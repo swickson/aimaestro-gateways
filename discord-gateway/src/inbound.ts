@@ -6,11 +6,54 @@
  */
 
 import type { Client, Message, TextChannel } from 'discord.js';
-import type { GatewayConfig, AMPRouteRequest } from './types.js';
+import type { GatewayConfig, AMPRouteRequest, ResolvedUser } from './types.js';
 import type { AgentResolver } from './agent-resolver.js';
+import type { UserResolver } from './user-resolver.js';
 import type { ThreadStore } from './thread-store.js';
 import { sanitizeDiscordMessage, type SecurityConfig } from './content-security.js';
 import { logEvent } from './api/activity-log.js';
+
+// ---------------------------------------------------------------------------
+// Topic Hints Extraction
+// ---------------------------------------------------------------------------
+
+const STOP_WORDS = new Set([
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+  'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
+  'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during',
+  'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
+  'under', 'again', 'further', 'then', 'once', 'and', 'but', 'or', 'nor',
+  'not', 'so', 'yet', 'both', 'either', 'neither', 'each', 'every', 'all',
+  'any', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'only',
+  'same', 'than', 'too', 'very', 'just', 'because', 'if', 'when', 'where',
+  'how', 'what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those',
+  'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'him', 'his', 'she',
+  'her', 'it', 'its', 'they', 'them', 'their', 'about', 'up',
+]);
+
+/**
+ * Extract lightweight topic hints from message text.
+ * Returns up to 3 keywords, filtered for stop words and short tokens.
+ */
+function extractTopicHints(text: string): string[] {
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+
+  // Count frequency, take top 3
+  const freq = new Map<string, number>();
+  for (const w of words) {
+    freq.set(w, (freq.get(w) || 0) + 1);
+  }
+
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([word]) => word);
+}
 
 /**
  * Parse @AIM:agent-name routing from message text.
@@ -60,13 +103,16 @@ async function sendToAgent(
   displayName: string,
   discordUserId: string,
   securityConfig: SecurityConfig,
-  threadStore: ThreadStore
+  threadStore: ThreadStore,
+  resolvedUser: ResolvedUser | null,
+  isDM: boolean
 ): Promise<void> {
   const { sanitized, trust, flags } = sanitizeDiscordMessage(
     text,
     discordUserId,
     displayName,
-    securityConfig
+    securityConfig,
+    resolvedUser
   );
 
   if (flags.length > 0) {
@@ -81,6 +127,15 @@ async function sendToAgent(
     });
   }
 
+  // Determine if this is a new conversation
+  const recentThread = threadStore.findByChannel(channelId);
+  const conversationTimeoutMs = 30 * 60 * 1000; // 30 minutes
+  const isNewConversation = isDM
+    ? !recentThread || (Date.now() - recentThread.createdAt > conversationTimeoutMs)
+    : true; // Guild @mentions are always treated as new conversations
+
+  const topicHints = extractTopicHints(text);
+
   const ampRequest: AMPRouteRequest = {
     to: targetAddress,
     subject: `Discord message from ${displayName}`,
@@ -89,6 +144,7 @@ async function sendToAgent(
       type: 'request',
       message: sanitized,
       context: {
+        // Legacy fields (kept for backward compatibility)
         channel: {
           type: 'discord',
           sender: displayName,
@@ -106,6 +162,24 @@ async function sendToAgent(
           wrapped: trust.level !== 'operator',
           scanned_at: new Date().toISOString(),
         },
+        // New enriched context (Phase 2)
+        sender: {
+          platformUserId: discordUserId,
+          platform: 'discord',
+          handle: displayName,
+          ...(resolvedUser && {
+            userId: resolvedUser.id,
+            displayName: resolvedUser.displayName,
+            trustLevel: resolvedUser.trustLevel,
+            role: resolvedUser.role,
+          }),
+        },
+        thread: {
+          threadId: channelId,
+          inReplyTo: recentThread?.ampMessageId || null,
+          isNewConversation,
+        },
+        ...(topicHints.length > 0 && { topicHints }),
       },
     },
   };
@@ -166,15 +240,20 @@ async function routeMessage(
   resolver: AgentResolver,
   securityConfig: SecurityConfig,
   threadStore: ThreadStore,
+  userResolver: UserResolver,
   text: string,
   channelId: string,
   messageId: string,
   displayName: string,
   discordUserId: string,
+  isDM: boolean,
   reply: (text: string) => Promise<void>
 ): Promise<void> {
   const { agent, message } = parseAgentRouting(text, config.amp.defaultAgent);
   const { address } = resolver.lookupAgent(agent);
+
+  // Resolve sender against user directory
+  const resolvedUser = await userResolver.resolve('discord', discordUserId, displayName);
 
   try {
     await sendToAgent(
@@ -186,7 +265,9 @@ async function routeMessage(
       displayName,
       discordUserId,
       securityConfig,
-      threadStore
+      threadStore,
+      resolvedUser,
+      isDM
     );
   } catch (error) {
     const errMsg = (error as Error).message;
@@ -216,7 +297,8 @@ export function registerInboundHandlers(
   config: GatewayConfig,
   resolver: AgentResolver,
   securityConfig: SecurityConfig,
-  threadStore: ThreadStore
+  threadStore: ThreadStore,
+  userResolver: UserResolver
 ): void {
   client.on('messageCreate', async (message: Message) => {
     if (message.author.bot) return;
@@ -254,11 +336,13 @@ export function registerInboundHandlers(
         resolver,
         securityConfig,
         threadStore,
+        userResolver,
         text,
         message.channelId,
         message.id,
         displayName,
         message.author.id,
+        isDM,
         reply
       );
     } catch (error) {

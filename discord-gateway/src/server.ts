@@ -13,12 +13,14 @@ import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import { loadConfig } from './config.js';
 import { loadSecurityConfig, type SecurityConfig } from './content-security.js';
 import { createAgentResolver } from './agent-resolver.js';
+import { createUserResolver } from './user-resolver.js';
 import { ThreadStore } from './thread-store.js';
 import { registerInboundHandlers } from './inbound.js';
 import { startOutboundPoller } from './outbound.js';
 import { createConfigRouter } from './api/config-api.js';
 import { createActivityRouter } from './api/activity-api.js';
 import { createStatsRouter } from './api/stats-api.js';
+import { createDMRouter } from './api/dm-api.js';
 import type { GatewayConfig } from './types.js';
 
 function authMiddleware(adminToken: string) {
@@ -58,7 +60,8 @@ async function main(): Promise<void> {
   console.log(`Maestro: ${config.amp.maestroUrl}`);
   console.log(`Inbox: ${config.amp.inboxDir}`);
   console.log(`Poll interval: ${config.polling.intervalMs}ms`);
-  console.log(`Security: ${securityConfig.operatorDiscordIds.length} operator Discord ID(s) whitelisted`);
+  console.log(`Security: ${securityConfig.operatorDiscordIds.length} operator Discord ID(s) whitelisted (legacy fallback)`);
+  console.log(`User directory: ${config.amp.maestroUrl}/api/users/resolve (cache TTL: ${config.cache.userTtlMs}ms)`);
   console.log(`Debug: ${config.debug}`);
 
   // Create Discord.js client
@@ -75,6 +78,9 @@ async function main(): Promise<void> {
   // Create agent resolver
   const resolver = createAgentResolver(config);
 
+  // Create user resolver (user directory integration)
+  const userResolver = createUserResolver(config);
+
   // Create thread store with persistence
   const threadStore = new ThreadStore();
   const threadStorePath = path.resolve(
@@ -86,7 +92,7 @@ async function main(): Promise<void> {
   threadStore.startCleanup(60000);
 
   // Register Discord event handlers
-  registerInboundHandlers(client, config, resolver, securityConfig, threadStore);
+  registerInboundHandlers(client, config, resolver, securityConfig, threadStore, userResolver);
 
   // Discord ready event
   client.once('ready', () => {
@@ -148,6 +154,11 @@ async function main(): Promise<void> {
     )
   );
 
+  httpApp.use(
+    '/api/gateway/dm',
+    createDMRouter(() => client)
+  );
+
   const server = httpApp.listen(config.port, '127.0.0.1', () => {
     console.log(`[HTTP] Management API on http://127.0.0.1:${config.port}`);
   });
@@ -158,6 +169,7 @@ async function main(): Promise<void> {
   console.log('  GET  /api/config    - Gateway config');
   console.log('  GET  /api/stats     - Gateway metrics');
   console.log('  GET  /api/activity  - Activity log');
+  console.log('  POST /api/gateway/dm - Outbound DM delivery');
   console.log('========================================');
   console.log('');
   console.log('Gateway ready! (AMP Protocol)');
@@ -180,6 +192,7 @@ async function main(): Promise<void> {
     console.log('[SHUTDOWN] Thread store saved');
 
     resolver.clearCaches();
+    userResolver.clearCache();
 
     server.close(() => {
       console.log('[SHUTDOWN] HTTP server closed');

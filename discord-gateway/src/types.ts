@@ -22,6 +22,7 @@ export interface GatewayConfig {
   cache: {
     agentTtlMs: number;
     slackUserTtlMs: number;
+    userTtlMs: number;
   };
   polling: {
     intervalMs: number;
@@ -102,6 +103,29 @@ export interface ThreadContext {
   userName: string;
   ampMessageId: string;
   createdAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// User Directory (resolved from Maestro /api/users/resolve)
+// ---------------------------------------------------------------------------
+
+export interface UserPlatformMapping {
+  type: string;
+  platformUserId: string;
+  handle: string;
+  context: Record<string, unknown>;
+}
+
+export interface ResolvedUser {
+  id: string;
+  displayName: string;
+  aliases: string[];
+  platforms: UserPlatformMapping[];
+  role: 'operator' | 'external';
+  trustLevel: 'full' | 'none';
+  preferredPlatform?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ---------------------------------------------------------------------------

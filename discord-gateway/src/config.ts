@@ -78,6 +78,7 @@ function buildConfig(ampOverrides?: {
     cache: {
       agentTtlMs: parseInt(process.env.CACHE_AGENT_TTL_MS || '300000', 10),
       slackUserTtlMs: parseInt(process.env.CACHE_SLACK_USER_TTL_MS || '600000', 10),
+      userTtlMs: parseInt(process.env.CACHE_USER_TTL_MS || '300000', 10),
     },
     polling: {
       intervalMs: parseInt(process.env.POLL_INTERVAL_MS || '3000', 10),

@@ -6,3 +6,4 @@ dist/
 credentials/
 credentials.yaml
 *.bak
+CLAUDE.md

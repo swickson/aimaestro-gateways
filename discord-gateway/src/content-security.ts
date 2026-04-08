@@ -14,6 +14,8 @@
 // Trust Model
 // ---------------------------------------------------------------------------
 
+import type { ResolvedUser } from './types.js';
+
 export type TrustLevel = 'operator' | 'external';
 
 export interface TrustResult {
@@ -41,13 +43,33 @@ export function loadSecurityConfig(): SecurityConfig {
 
 /**
  * Determine trust level for a Discord user.
+ *
+ * If a resolved user record is provided (from user directory), trust is
+ * determined by the user's role/trustLevel. Falls back to the legacy
+ * OPERATOR_DISCORD_IDS env var check when no user record is available.
  */
 export function resolveTrust(
   discordUserId: string,
-  securityConfig: SecurityConfig
+  securityConfig: SecurityConfig,
+  resolvedUser?: ResolvedUser | null
 ): TrustResult {
+  // Prefer user directory trust if available
+  if (resolvedUser) {
+    if (resolvedUser.role === 'operator' || resolvedUser.trustLevel === 'full') {
+      return {
+        level: 'operator',
+        reason: `User ${resolvedUser.displayName} has role=${resolvedUser.role}, trustLevel=${resolvedUser.trustLevel} in user directory`,
+      };
+    }
+    return {
+      level: 'external',
+      reason: `User ${resolvedUser.displayName} has role=${resolvedUser.role}, trustLevel=${resolvedUser.trustLevel} in user directory`,
+    };
+  }
+
+  // Legacy fallback: env var whitelist
   if (securityConfig.operatorDiscordIds.includes(discordUserId)) {
-    return { level: 'operator', reason: `Discord user ${discordUserId} is in operator whitelist` };
+    return { level: 'operator', reason: `Discord user ${discordUserId} is in operator whitelist (legacy)` };
   }
 
   return { level: 'external', reason: `Discord user ${discordUserId} is not recognized` };
@@ -178,9 +200,10 @@ export function sanitizeDiscordMessage(
   text: string,
   discordUserId: string,
   displayName: string,
-  securityConfig: SecurityConfig
+  securityConfig: SecurityConfig,
+  resolvedUser?: ResolvedUser | null
 ): { sanitized: string; trust: TrustResult; flags: InjectionFlag[] } {
-  const trust = resolveTrust(discordUserId, securityConfig);
+  const trust = resolveTrust(discordUserId, securityConfig, resolvedUser);
 
   if (trust.level === 'operator') {
     return { sanitized: text, trust, flags: [] };
