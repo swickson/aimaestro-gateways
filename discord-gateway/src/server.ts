@@ -62,6 +62,12 @@ async function main(): Promise<void> {
   console.log(`Poll interval: ${config.polling.intervalMs}ms`);
   console.log(`Security: ${securityConfig.operatorDiscordIds.length} operator Discord ID(s) whitelisted (legacy fallback)`);
   console.log(`User directory: ${config.amp.maestroUrl}/api/users/resolve (cache TTL: ${config.cache.userTtlMs}ms)`);
+  if (config.watchWebhooks.length > 0) {
+    console.log(`Watch webhooks: ${config.watchWebhooks.length} configured`);
+    for (const w of config.watchWebhooks) {
+      console.log(`  - channel ${w.channelId} / webhook ${w.webhookId} -> ${w.targetAgent}`);
+    }
+  }
   console.log(`Debug: ${config.debug}`);
 
   // Create Discord.js client

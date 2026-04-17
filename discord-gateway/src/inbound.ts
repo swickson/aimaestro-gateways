@@ -6,7 +6,7 @@
  */
 
 import type { Client, Message, TextChannel } from 'discord.js';
-import type { GatewayConfig, AMPRouteRequest, ResolvedUser } from './types.js';
+import type { GatewayConfig, AMPRouteRequest, ResolvedUser, WatchWebhookEntry } from './types.js';
 import type { AgentResolver } from './agent-resolver.js';
 import type { UserResolver } from './user-resolver.js';
 import type { ThreadStore } from './thread-store.js';
@@ -105,7 +105,8 @@ async function sendToAgent(
   securityConfig: SecurityConfig,
   threadStore: ThreadStore,
   resolvedUser: ResolvedUser | null,
-  isDM: boolean
+  isDM: boolean,
+  monitorMode: boolean = false
 ): Promise<void> {
   const { sanitized, trust, flags } = sanitizeDiscordMessage(
     text,
@@ -180,6 +181,7 @@ async function sendToAgent(
           isNewConversation,
         },
         ...(topicHints.length > 0 && { topicHints }),
+        ...(monitorMode && { mode: 'monitor' as const }),
       },
     },
   };
@@ -207,7 +209,9 @@ async function sendToAgent(
 
   const result = await response.json();
 
-  if (result.id) {
+  // Skip thread-store mapping in monitor mode so any accidental reply from the
+  // target agent does not land back in the watched channel.
+  if (result.id && !monitorMode) {
     threadStore.set(result.id, {
       channelId,
       messageId,
@@ -290,6 +294,22 @@ async function routeMessage(
 }
 
 /**
+ * Lookup a watch-webhook config entry for a message, if any.
+ * Matches on both channelId and webhookId — either alone is not enough.
+ */
+function matchWatchWebhook(
+  message: Message,
+  entries: WatchWebhookEntry[]
+): WatchWebhookEntry | null {
+  if (!message.webhookId || entries.length === 0) return null;
+  return (
+    entries.find(
+      e => e.channelId === message.channelId && e.webhookId === message.webhookId
+    ) || null
+  );
+}
+
+/**
  * Register all inbound Discord event handlers.
  */
 export function registerInboundHandlers(
@@ -301,6 +321,47 @@ export function registerInboundHandlers(
   userResolver: UserResolver
 ): void {
   client.on('messageCreate', async (message: Message) => {
+    // Watch-webhook fast path: route messages from whitelisted webhooks to a
+    // fixed agent in monitor mode (no reactions, no reply, no threadStore).
+    const watch = matchWatchWebhook(message, config.watchWebhooks);
+    if (watch) {
+      const text = message.content?.trim();
+      if (!text) return;
+
+      const webhookName =
+        message.author?.username || `webhook:${message.webhookId}`;
+
+      console.log(
+        `[Discord <- watch] #${(message.channel as TextChannel).name || message.channelId} from ${webhookName} -> ${watch.targetAgent}: ${text.substring(0, 50)}...`
+      );
+
+      try {
+        const { address } = resolver.lookupAgent(watch.targetAgent);
+        await sendToAgent(
+          config,
+          address,
+          text,
+          message.channelId,
+          message.id,
+          webhookName,
+          message.webhookId!,
+          securityConfig,
+          threadStore,
+          null,
+          false,
+          true
+        );
+      } catch (error) {
+        console.error('[WATCH] Failed to route webhook message:', error);
+        logEvent('error', `Watch-webhook route failed: ${webhookName}`, {
+          from: webhookName,
+          to: watch.targetAgent,
+          error: (error as Error).message,
+        });
+      }
+      return;
+    }
+
     if (message.author.bot) return;
 
     const isDM = !message.guild;

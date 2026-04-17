@@ -9,9 +9,32 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 import { bootstrapAMP } from './amp-bootstrap.js';
-import type { GatewayConfig } from './types.js';
+import type { GatewayConfig, WatchWebhookEntry } from './types.js';
 
 dotenv.config();
+
+/**
+ * Parse WATCH_WEBHOOKS env var.
+ * Format: channelId:webhookId:targetAgent[,channelId:webhookId:targetAgent,...]
+ * Lines that don't have all three colon-separated parts are skipped with a warning.
+ */
+function parseWatchWebhooks(raw: string | undefined): WatchWebhookEntry[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(entry => {
+      const parts = entry.split(':');
+      if (parts.length !== 3 || parts.some(p => !p.trim())) {
+        console.warn(`[CONFIG] Skipping malformed WATCH_WEBHOOKS entry: "${entry}" (expected channelId:webhookId:targetAgent)`);
+        return null;
+      }
+      const [channelId, webhookId, targetAgent] = parts.map(p => p.trim());
+      return { channelId, webhookId, targetAgent };
+    })
+    .filter((e): e is WatchWebhookEntry => e !== null);
+}
 
 /**
  * Resolve the AMP inbox directory for the discord-bot agent.
@@ -84,6 +107,7 @@ function buildConfig(ampOverrides?: {
       intervalMs: parseInt(process.env.POLL_INTERVAL_MS || '3000', 10),
       timeoutMs: parseInt(process.env.POLL_TIMEOUT_MS || '10000', 10),
     },
+    watchWebhooks: parseWatchWebhooks(process.env.WATCH_WEBHOOKS),
     debug: process.env.DEBUG === 'true',
     adminToken: process.env.ADMIN_TOKEN || '',
   };

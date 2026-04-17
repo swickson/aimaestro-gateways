@@ -6,6 +6,12 @@
 // Gateway Configuration
 // ---------------------------------------------------------------------------
 
+export interface WatchWebhookEntry {
+  channelId: string;
+  webhookId: string;
+  targetAgent: string;
+}
+
 export interface GatewayConfig {
   port: number;
   discord: {
@@ -28,6 +34,7 @@ export interface GatewayConfig {
     intervalMs: number;
     timeoutMs: number;
   };
+  watchWebhooks: WatchWebhookEntry[];
   debug: boolean;
   adminToken: string;
 }
