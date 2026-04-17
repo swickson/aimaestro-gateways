@@ -108,6 +108,7 @@ function buildConfig(ampOverrides?: {
       timeoutMs: parseInt(process.env.POLL_TIMEOUT_MS || '10000', 10),
     },
     watchWebhooks: parseWatchWebhooks(process.env.WATCH_WEBHOOKS),
+    watchDedupWindowMs: parseInt(process.env.WATCH_DEDUP_WINDOW_MS || '60000', 10),
     debug: process.env.DEBUG === 'true',
     adminToken: process.env.ADMIN_TOKEN || '',
   };

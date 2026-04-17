@@ -5,6 +5,7 @@
  * to agents via AMP POST /api/v1/route.
  */
 
+import { createHash } from 'crypto';
 import type { Client, Message, TextChannel } from 'discord.js';
 import type { GatewayConfig, AMPRouteRequest, ResolvedUser, WatchWebhookEntry } from './types.js';
 import type { AgentResolver } from './agent-resolver.js';
@@ -12,6 +13,39 @@ import type { UserResolver } from './user-resolver.js';
 import type { ThreadStore } from './thread-store.js';
 import { sanitizeDiscordMessage, type SecurityConfig } from './content-security.js';
 import { logEvent } from './api/activity-log.js';
+
+// ---------------------------------------------------------------------------
+// Watch-webhook deduplication
+// ---------------------------------------------------------------------------
+
+// Some upstream Discord webhook producers (notably the Facebook Groups
+// Watcher) double-emit every event within <50ms. We drop the second copy
+// at the gateway because Hale should not draft the same response twice
+// and the memory-retrieval middleware could double-weight reinforced facts.
+const watchDedupSeen = new Map<string, number>();
+
+function isDuplicateWatchMessage(
+  channelId: string,
+  webhookId: string,
+  text: string,
+  windowMs: number
+): boolean {
+  const key = createHash('sha256')
+    .update(`${channelId}::${webhookId}::${text}`)
+    .digest('hex')
+    .slice(0, 16);
+  const now = Date.now();
+  const seenAt = watchDedupSeen.get(key);
+
+  // Sweep stale entries so the Map stays bounded regardless of traffic.
+  for (const [k, ts] of watchDedupSeen) {
+    if (now - ts >= windowMs) watchDedupSeen.delete(k);
+  }
+
+  if (seenAt !== undefined && now - seenAt < windowMs) return true;
+  watchDedupSeen.set(key, now);
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Topic Hints Extraction
@@ -310,6 +344,37 @@ function matchWatchWebhook(
 }
 
 /**
+ * Extract routable text from a watch-webhook message.
+ *
+ * Webhook-posted content often lives entirely in rich embeds (title,
+ * description, fields) rather than the plain `content` field — that was
+ * the gap that caused production Facebook watcher posts to be dropped
+ * silently. We concatenate content + every embed's title/description/
+ * fields so the target agent gets the full post.
+ *
+ * Only used in the watch branch; the normal (human) inbound path keeps
+ * using message.content to avoid over-eager embed slurping.
+ */
+function extractWatchText(message: Message): string {
+  const parts: string[] = [];
+
+  const content = message.content?.trim();
+  if (content) parts.push(content);
+
+  for (const embed of message.embeds) {
+    const embedParts: string[] = [];
+    if (embed.title) embedParts.push(embed.title);
+    if (embed.description) embedParts.push(embed.description);
+    for (const field of embed.fields) {
+      embedParts.push(`${field.name}: ${field.value}`);
+    }
+    if (embedParts.length > 0) parts.push(embedParts.join('\n'));
+  }
+
+  return parts.join('\n\n').trim();
+}
+
+/**
  * Register all inbound Discord event handlers.
  */
 export function registerInboundHandlers(
@@ -325,11 +390,25 @@ export function registerInboundHandlers(
     // fixed agent in monitor mode (no reactions, no reply, no threadStore).
     const watch = matchWatchWebhook(message, config.watchWebhooks);
     if (watch) {
-      const text = message.content?.trim();
+      const text = extractWatchText(message);
       if (!text) return;
 
       const webhookName =
         message.author?.username || `webhook:${message.webhookId}`;
+
+      if (
+        isDuplicateWatchMessage(
+          message.channelId,
+          message.webhookId!,
+          text,
+          config.watchDedupWindowMs
+        )
+      ) {
+        console.log(
+          `[Discord <- watch dedup] Suppressed duplicate from ${webhookName}: ${text.substring(0, 50)}...`
+        );
+        return;
+      }
 
       console.log(
         `[Discord <- watch] #${(message.channel as TextChannel).name || message.channelId} from ${webhookName} -> ${watch.targetAgent}: ${text.substring(0, 50)}...`

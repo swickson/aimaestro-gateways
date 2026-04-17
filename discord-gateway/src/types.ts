@@ -35,6 +35,8 @@ export interface GatewayConfig {
     timeoutMs: number;
   };
   watchWebhooks: WatchWebhookEntry[];
+  /** Drop duplicate watch-webhook messages seen within this window (ms). 0 disables. */
+  watchDedupWindowMs: number;
   debug: boolean;
   adminToken: string;
 }
