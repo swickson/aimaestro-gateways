@@ -14,6 +14,7 @@ export interface WatchWebhookEntry {
 
 export interface GatewayConfig {
   port: number;
+  host: string[];
   discord: {
     botToken: string;
   };

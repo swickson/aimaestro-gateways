@@ -25,10 +25,6 @@ import type { GatewayConfig } from './types.js';
 
 function authMiddleware(adminToken: string) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!adminToken) {
-      console.warn('[AUTH] No ADMIN_TOKEN configured - API access is unrestricted');
-      return next();
-    }
     const auth = req.headers.authorization || '';
     const expected = `Bearer ${adminToken}`;
     if (auth.length === expected.length && timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
@@ -165,9 +161,11 @@ async function main(): Promise<void> {
     createDMRouter(() => client)
   );
 
-  const server = httpApp.listen(config.port, '127.0.0.1', () => {
-    console.log(`[HTTP] Management API on http://127.0.0.1:${config.port}`);
-  });
+  const servers = config.host.map((host) =>
+    httpApp.listen(config.port, host, () => {
+      console.log(`[HTTP] Management API on http://${host}:${config.port}`);
+    })
+  );
 
   console.log('');
   console.log('Endpoints:');
@@ -200,9 +198,10 @@ async function main(): Promise<void> {
     resolver.clearCaches();
     userResolver.clearCache();
 
-    server.close(() => {
-      console.log('[SHUTDOWN] HTTP server closed');
-    });
+    for (const s of servers) {
+      s.close(() => {});
+    }
+    console.log('[SHUTDOWN] HTTP servers closed');
 
     try {
       client.destroy();

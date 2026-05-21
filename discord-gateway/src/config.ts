@@ -87,6 +87,7 @@ function buildConfig(ampOverrides?: {
 
   return {
     port: parseInt(process.env.PORT || '3023', 10),
+    host: (process.env.HOST || '127.0.0.1').split(',').map((h) => h.trim()).filter(Boolean),
     discord: {
       botToken: process.env.DISCORD_BOT_TOKEN!,
     },
@@ -110,7 +111,13 @@ function buildConfig(ampOverrides?: {
     watchWebhooks: parseWatchWebhooks(process.env.WATCH_WEBHOOKS),
     watchDedupWindowMs: parseInt(process.env.WATCH_DEDUP_WINDOW_MS || '60000', 10),
     debug: process.env.DEBUG === 'true',
-    adminToken: process.env.ADMIN_TOKEN || '',
+    adminToken: (() => {
+      const t = process.env.ADMIN_TOKEN;
+      if (!t) {
+        throw new Error('ADMIN_TOKEN is required — generate one with `openssl rand -hex 32` and set it in .env');
+      }
+      return t;
+    })(),
   };
 }
 
