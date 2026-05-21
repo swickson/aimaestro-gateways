@@ -6,4 +6,8 @@ dist/
 credentials/
 credentials.yaml
 *.bak
+*.swp
 CLAUDE.md
+.claude/
+ai-team/
+teams-gateway/

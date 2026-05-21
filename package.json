@@ -11,7 +11,7 @@
     "test": "cd discord-gateway && npm test"
   },
   "devDependencies": {
-    "eslint": "^9.0.0",
-    "typescript-eslint": "^8.0.0"
+    "eslint": "^9.39.4",
+    "typescript-eslint": "^8.59.1"
   }
 }
