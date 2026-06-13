@@ -3,6 +3,15 @@ dist/
 .env
 .env.*
 !.env.example
+# Generated Teams app packages — contain bot App IDs + the public ingress hostname
+# (no secrets, but needless disclosure on a public repo). Regenerate from .env anytime.
+teams-gateway/teams-app/
 credentials/
 credentials.yaml
 *.bak
+*.swp
+.claude/
+ai-team/
+# Internal design docs (architecture / mesh detail) — keep out of the public repo
+teams-gateway/PLAN.md
+teams-gateway/packages-common-PLAN.md

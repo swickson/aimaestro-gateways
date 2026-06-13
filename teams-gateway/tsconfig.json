@@ -1,0 +1,17 @@
+{
+  "//": "Teams gateway tsconfig. The `paths` mapping resolves the shared package at compile time; `tsx` resolves it natively at runtime — NO dist build. The skeleton phase fills in real `src/`.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "strict": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@aimaestro/common/*": ["../packages/common/src/*"]
+    }
+  },
+  "include": ["src/**/*"]
+}

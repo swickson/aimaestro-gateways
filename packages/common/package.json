@@ -1,0 +1,20 @@
+{
+  "name": "@aimaestro/common",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared modules for the aimaestro gateways (AMP types, content-security scanner, TTL cache, admin auth, AMP bootstrap). Consumed via tsconfig paths + tsx — no dist build.",
+  "scripts": {
+    "test": "node --import tsx --test src/__tests__/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.22.4",
+    "typescript": "^5.7.2"
+  }
+}

@@ -9,9 +9,32 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 import { bootstrapAMP } from './amp-bootstrap.js';
-import type { GatewayConfig } from './types.js';
+import type { GatewayConfig, WatchWebhookEntry } from './types.js';
 
 dotenv.config();
+
+/**
+ * Parse WATCH_WEBHOOKS env var.
+ * Format: channelId:webhookId:targetAgent[,channelId:webhookId:targetAgent,...]
+ * Lines that don't have all three colon-separated parts are skipped with a warning.
+ */
+function parseWatchWebhooks(raw: string | undefined): WatchWebhookEntry[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(entry => {
+      const parts = entry.split(':');
+      if (parts.length !== 3 || parts.some(p => !p.trim())) {
+        console.warn(`[CONFIG] Skipping malformed WATCH_WEBHOOKS entry: "${entry}" (expected channelId:webhookId:targetAgent)`);
+        return null;
+      }
+      const [channelId, webhookId, targetAgent] = parts.map(p => p.trim());
+      return { channelId, webhookId, targetAgent };
+    })
+    .filter((e): e is WatchWebhookEntry => e !== null);
+}
 
 /**
  * Resolve the AMP inbox directory for the discord-bot agent.
@@ -64,6 +87,7 @@ function buildConfig(ampOverrides?: {
 
   return {
     port: parseInt(process.env.PORT || '3023', 10),
+    host: (process.env.HOST || '127.0.0.1').split(',').map((h) => h.trim()).filter(Boolean),
     discord: {
       botToken: process.env.DISCORD_BOT_TOKEN!,
     },
@@ -78,13 +102,22 @@ function buildConfig(ampOverrides?: {
     cache: {
       agentTtlMs: parseInt(process.env.CACHE_AGENT_TTL_MS || '300000', 10),
       slackUserTtlMs: parseInt(process.env.CACHE_SLACK_USER_TTL_MS || '600000', 10),
+      userTtlMs: parseInt(process.env.CACHE_USER_TTL_MS || '300000', 10),
     },
     polling: {
       intervalMs: parseInt(process.env.POLL_INTERVAL_MS || '3000', 10),
       timeoutMs: parseInt(process.env.POLL_TIMEOUT_MS || '10000', 10),
     },
+    watchWebhooks: parseWatchWebhooks(process.env.WATCH_WEBHOOKS),
+    watchDedupWindowMs: parseInt(process.env.WATCH_DEDUP_WINDOW_MS || '60000', 10),
     debug: process.env.DEBUG === 'true',
-    adminToken: process.env.ADMIN_TOKEN || '',
+    adminToken: (() => {
+      const t = process.env.ADMIN_TOKEN;
+      if (!t) {
+        throw new Error('ADMIN_TOKEN is required — generate one with `openssl rand -hex 32` and set it in .env');
+      }
+      return t;
+    })(),
   };
 }
 
