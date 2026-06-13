@@ -69,6 +69,10 @@ function resolveInboxDir(agentAddress: string): string {
 
 export async function loadConfig(): Promise<GatewayConfig> {
   const maestroUrl = process.env.AMP_MAESTRO_URL || process.env.AIMAESTRO_URL || 'http://127.0.0.1:23000';
+  const adminToken = process.env.ADMIN_TOKEN ?? '';
+  if (adminToken.trim() === '') {
+    throw new Error('[CONFIG] ADMIN_TOKEN is required and cannot be empty (fail-closed).');
+  }
 
   // Auto-bootstrap if no AMP_API_KEY
   let ampApiKey = process.env.AMP_API_KEY || '';
@@ -163,7 +167,7 @@ export async function loadConfig(): Promise<GatewayConfig> {
     storage: {
       attachmentsPath: process.env.ATTACHMENTS_PATH || './attachments',
     },
-    adminToken: process.env.ADMIN_TOKEN || '',
+    adminToken,
     emailBaseDomain: process.env.EMAIL_BASE_DOMAIN || 'example.com',
   };
 
