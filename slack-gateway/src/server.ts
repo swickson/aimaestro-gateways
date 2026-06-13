@@ -17,9 +17,11 @@
  */
 
 import * as path from 'path';
-import { timingSafeEqual } from 'crypto';
-import express, { Request, Response, NextFunction } from 'express';
+import { pathToFileURL } from 'url';
+import express from 'express';
+import type { RequestHandler } from 'express';
 import { App } from '@slack/bolt';
+import { createAuthMiddleware } from '@aimaestro/common/auth.js';
 import { loadConfig } from './config.js';
 import { loadSecurityConfig, type SecurityConfig } from './content-security.js';
 import { createAgentResolver } from './agent-resolver.js';
@@ -31,23 +33,64 @@ import { createActivityRouter } from './api/activity-api.js';
 import { createStatsRouter } from './api/stats-api.js';
 import type { GatewayConfig } from './types.js';
 
-/**
- * Bearer token authentication middleware for management API routes.
- * If ADMIN_TOKEN is not set, access is allowed (backwards compatibility).
- */
-function authMiddleware(adminToken: string) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    if (!adminToken) {
-      console.warn('[AUTH] No ADMIN_TOKEN configured - API access is unrestricted');
-      return next();
-    }
-    const auth = req.headers.authorization || '';
-    const expected = `Bearer ${adminToken}`;
-    if (auth.length === expected.length && timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
-      return next();
-    }
-    res.status(401).json({ error: 'Unauthorized' });
-  };
+interface HttpAppDeps {
+  config: GatewayConfig;
+  securityConfig: SecurityConfig;
+  updateSecurityConfig: (config: SecurityConfig) => void;
+  threadCount: () => number;
+  slackConnected?: boolean;
+}
+
+export function createHttpApp({
+  config,
+  securityConfig,
+  updateSecurityConfig,
+  threadCount,
+  slackConnected = true,
+}: HttpAppDeps) {
+  let currentSecurityConfig = securityConfig;
+  const httpApp = express();
+  httpApp.use(express.json());
+
+  // Health check (public, no auth required)
+  httpApp.get('/health', (_req, res) => {
+    res.json({
+      status: 'ok',
+      service: 'slack-gateway',
+      protocol: 'AMP',
+      slack: { connected: slackConnected },
+      amp: {
+        agent: config.amp.agentAddress,
+        maestro: config.amp.maestroUrl,
+        tenant: config.amp.tenant,
+      },
+      threads: threadCount(),
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // Auth middleware for management APIs. Fails closed if ADMIN_TOKEN is blank.
+  httpApp.use('/api', createAuthMiddleware(config.adminToken) as unknown as RequestHandler);
+
+  // Management APIs
+  httpApp.use(
+    '/api/config',
+    createConfigRouter(
+      () => config,
+      () => currentSecurityConfig,
+      (newConfig) => {
+        currentSecurityConfig = newConfig;
+        updateSecurityConfig(newConfig);
+      },
+      config.adminToken
+    )
+  );
+
+  httpApp.use('/api/activity', createActivityRouter());
+
+  httpApp.use('/api/stats', createStatsRouter(() => config));
+
+  return httpApp;
 }
 
 async function main(): Promise<void> {
@@ -107,45 +150,14 @@ async function main(): Promise<void> {
   const stopPoller = startOutboundPoller(config, slackApp, threadStore);
 
   // Express server for health checks and management APIs
-  const httpApp = express();
-  httpApp.use(express.json());
-
-  // Health check (public, no auth required)
-  httpApp.get('/health', (_req, res) => {
-    res.json({
-      status: 'ok',
-      service: 'slack-gateway',
-      protocol: 'AMP',
-      slack: { connected: true },
-      amp: {
-        agent: config.amp.agentAddress,
-        maestro: config.amp.maestroUrl,
-        tenant: config.amp.tenant,
-      },
-      threads: threadStore.size(),
-      timestamp: new Date().toISOString(),
-    });
+  const httpApp = createHttpApp({
+    config,
+    securityConfig,
+    updateSecurityConfig: (newConfig) => {
+      securityConfig = newConfig;
+    },
+    threadCount: () => threadStore.size(),
   });
-
-  // Auth middleware for management APIs
-  httpApp.use('/api', authMiddleware(config.adminToken));
-
-  // Management APIs
-  httpApp.use(
-    '/api/config',
-    createConfigRouter(
-      () => config,
-      () => securityConfig,
-      (newConfig) => {
-        securityConfig = newConfig;
-      },
-      config.adminToken
-    )
-  );
-
-  httpApp.use('/api/activity', createActivityRouter());
-
-  httpApp.use('/api/stats', createStatsRouter(() => config));
 
   const server = httpApp.listen(config.port, '127.0.0.1', () => {
     console.log(`[HTTP] Management API on http://127.0.0.1:${config.port}`);
@@ -202,7 +214,9 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-main().catch((err) => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+  });
+}

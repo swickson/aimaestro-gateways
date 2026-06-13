@@ -70,6 +70,10 @@ export function getRoutingFilePath(): string {
 
 export async function loadConfig(): Promise<GatewayConfig> {
   const maestroUrl = process.env.AMP_MAESTRO_URL || process.env.AIMAESTRO_URL || 'http://127.0.0.1:23000';
+  const adminToken = process.env.ADMIN_TOKEN ?? '';
+  if (adminToken.trim() === '') {
+    throw new Error('[CONFIG] ADMIN_TOKEN is required and cannot be empty (fail-closed).');
+  }
 
   // Auto-bootstrap if no AMP_API_KEY
   let ampApiKey = process.env.AMP_API_KEY || '';
@@ -158,7 +162,7 @@ export async function loadConfig(): Promise<GatewayConfig> {
       pollIntervalMs: parseInt(process.env.OUTBOUND_POLL_INTERVAL_MS || '5000', 10),
     },
     operatorPhones,
-    adminToken: process.env.ADMIN_TOKEN || '',
+    adminToken,
   };
 
   if (!config.amp.apiKey) {

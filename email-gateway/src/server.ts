@@ -8,11 +8,12 @@
  * URL pattern: https://email.{tenant}.{EMAIL_BASE_DOMAIN}/inbound
  */
 
-import express, { Request, Response, NextFunction } from 'express';
+import express, { Request, Response } from 'express';
 import crypto, { timingSafeEqual } from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { createAuthMiddleware } from '@aimaestro/common/auth.js';
 import { loadConfig } from './config.js';
 import { resolveRoute } from './router.js';
 import { startOutboundPoller } from './outbound.js';
@@ -25,21 +26,6 @@ import type { GatewayConfig, AMPRouteRequest, AMPRouteResponse } from './types.j
 
 const __filename_local = fileURLToPath(import.meta.url);
 const __dirname_local = path.dirname(__filename_local);
-
-function authMiddleware(adminToken: string) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    if (!adminToken) {
-      console.warn('[AUTH] No ADMIN_TOKEN configured - API access is unrestricted');
-      return next();
-    }
-    const auth = req.headers.authorization || '';
-    const expected = `Bearer ${adminToken}`;
-    if (auth.length === expected.length && timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
-      return next();
-    }
-    res.status(401).json({ error: 'Unauthorized' });
-  };
-}
 
 /**
  * Verify Mandrill webhook signature
@@ -254,23 +240,7 @@ function extractTenant(hostname: string): string {
   return 'unknown';
 }
 
-// ---------------------------------------------------------------------------
-// Main entry point (async for config loading)
-// ---------------------------------------------------------------------------
-
-async function main(): Promise<void> {
-  // Load config (async — may trigger AMP auto-registration)
-  let configLoaded: GatewayConfig;
-  let secConfigLoaded: SecurityConfig;
-  try {
-    configLoaded = await loadConfig();
-    secConfigLoaded = loadSecurityConfig();
-  } catch (err) {
-    console.error('[FATAL] Failed to load config:', err);
-    process.exit(1);
-  }
-
-  // Assign to module-level vars for use in handlers
+export function createHttpApp(configLoaded: GatewayConfig, secConfigLoaded: SecurityConfig) {
   config = configLoaded;
   securityConfig = secConfigLoaded;
 
@@ -286,8 +256,8 @@ async function main(): Promise<void> {
     next();
   });
 
-  // Management API routes
-  app.use('/api', authMiddleware(config.adminToken));
+  // Management API routes. Fails closed if ADMIN_TOKEN is blank.
+  app.use('/api', createAuthMiddleware(config.adminToken));
 
   app.use('/api/config', createConfigRouter(
     () => config,
@@ -299,7 +269,7 @@ async function main(): Promise<void> {
   app.use('/api/activity', createActivityRouter());
   app.use('/api/stats', createStatsRouter(() => config));
 
-  // Health check
+  // Health check (public, no auth required)
   app.get('/health', (req: Request, res: Response) => {
     res.json({
       status: 'ok',
@@ -317,14 +287,14 @@ async function main(): Promise<void> {
     });
   });
 
-  // Mandrill webhook validation
+  // Mandrill webhook validation (public, Mandrill challenge endpoint)
   app.head('/inbound', (req: Request, res: Response) => {
     const tenant = extractTenant(req.hostname);
     console.log(`[VALIDATION] Mandrill validating webhook for tenant: ${tenant}`);
     res.status(200).end();
   });
 
-  // Mandrill inbound webhook
+  // Mandrill inbound webhook (public path, protected by Mandrill signature)
   app.post('/inbound', async (req: Request, res: Response) => {
     const tenant = extractTenant(req.hostname);
 
@@ -456,10 +426,30 @@ async function main(): Promise<void> {
     });
   });
 
+  return app;
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point (async for config loading)
+// ---------------------------------------------------------------------------
+
+async function main(): Promise<void> {
+  // Load config (async — may trigger AMP auto-registration)
+  let configLoaded: GatewayConfig;
+  let secConfigLoaded: SecurityConfig;
+  try {
+    configLoaded = await loadConfig();
+    secConfigLoaded = loadSecurityConfig();
+  } catch (err) {
+    console.error('[FATAL] Failed to load config:', err);
+    process.exit(1);
+  }
+
+  const app = createHttpApp(configLoaded, secConfigLoaded);
+  const tenantList = Object.keys(config.mandrill.webhookKeys).join(', ');
+
   // Start server
   const server = app.listen(config.port, '127.0.0.1', () => {
-    const tenantList = Array.from(ALLOWED_TENANTS).join(', ');
-
     console.log('========================================');
     console.log('AI Maestro - Email Gateway (AMP)');
     console.log('========================================');
@@ -515,7 +505,9 @@ async function main(): Promise<void> {
 let config: GatewayConfig;
 let securityConfig: SecurityConfig;
 
-main().catch((err) => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+  });
+}
