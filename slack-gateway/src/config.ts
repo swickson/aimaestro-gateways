@@ -63,6 +63,10 @@ function buildConfig(ampOverrides?: {
   maestroUrl: string;
 }): GatewayConfig {
   const agentName = process.env.AMP_AGENT_NAME || 'slack-bot';
+  const adminToken = process.env.ADMIN_TOKEN ?? '';
+  if (adminToken.trim() === '') {
+    throw new Error('[CONFIG] ADMIN_TOKEN is required and cannot be empty (fail-closed).');
+  }
 
   return {
     port: parseInt(process.env.PORT || '3022', 10),
@@ -88,7 +92,7 @@ function buildConfig(ampOverrides?: {
       timeoutMs: parseInt(process.env.POLL_TIMEOUT_MS || '10000', 10),
     },
     debug: process.env.DEBUG === 'true',
-    adminToken: process.env.ADMIN_TOKEN || '',
+    adminToken,
   };
 }
 

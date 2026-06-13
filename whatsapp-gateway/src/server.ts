@@ -5,8 +5,9 @@
  * agents using the AMP protocol. Runs as a long-lived service managed by pm2.
  */
 
-import { timingSafeEqual } from 'crypto';
-import express, { Request, Response, NextFunction } from 'express';
+import { pathToFileURL } from 'url';
+import express from 'express';
+import { createAuthMiddleware } from '@aimaestro/common/auth.js';
 import { loadConfig } from './config.js';
 import { createSession, getStatus, getSelfJid, closeSession } from './session.js';
 import { handleInboundMessage } from './inbound.js';
@@ -14,47 +15,7 @@ import { startOutboundPoller } from './outbound.js';
 import { createActivityRouter } from './api/activity-api.js';
 import type { GatewayConfig } from './types.js';
 
-function authMiddleware(adminToken: string) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    if (!adminToken) {
-      console.warn('[AUTH] No ADMIN_TOKEN configured - API access is unrestricted');
-      return next();
-    }
-    const auth = req.headers.authorization || '';
-    const expected = `Bearer ${adminToken}`;
-    if (auth.length === expected.length && timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
-      return next();
-    }
-    res.status(401).json({ error: 'Unauthorized' });
-  };
-}
-
-async function main(): Promise<void> {
-  // Load config (async — may trigger AMP auto-registration)
-  let config: GatewayConfig;
-  try {
-    config = await loadConfig();
-  } catch (err) {
-    console.error('[FATAL] Failed to load config:', err);
-    process.exit(1);
-  }
-
-  console.log('========================================');
-  console.log('AI Maestro - WhatsApp Gateway (AMP)');
-  console.log('========================================');
-  console.log(`Port: ${config.port}`);
-  console.log(`Protocol: AMP`);
-  console.log(`Agent: ${config.amp.agentAddress}`);
-  console.log(`Default agent: ${config.amp.defaultAgent}`);
-  console.log(`Tenant: ${config.amp.tenant}`);
-  console.log(`Maestro: ${config.amp.maestroUrl}`);
-  console.log(`Inbox: ${config.amp.inboxDir}`);
-  console.log(`State dir: ${config.whatsapp.stateDir}`);
-  console.log(`DM policy: ${config.whatsapp.dmPolicy}`);
-  console.log(`Allow from: ${config.whatsapp.allowFrom.length > 0 ? config.whatsapp.allowFrom.join(', ') : '(all)'}`);
-  console.log(`Debug: ${config.debug}`);
-
-  // Express server for health checks and management
+export function createHttpApp(config: GatewayConfig) {
   const app = express();
   app.use(express.json());
 
@@ -90,8 +51,40 @@ async function main(): Promise<void> {
     });
   });
 
-  app.use('/api', authMiddleware(config.adminToken));
+  // Management APIs. Fails closed if ADMIN_TOKEN is blank.
+  app.use('/api', createAuthMiddleware(config.adminToken));
   app.use('/api/activity', createActivityRouter());
+
+  return app;
+}
+
+async function main(): Promise<void> {
+  // Load config (async — may trigger AMP auto-registration)
+  let config: GatewayConfig;
+  try {
+    config = await loadConfig();
+  } catch (err) {
+    console.error('[FATAL] Failed to load config:', err);
+    process.exit(1);
+  }
+
+  console.log('========================================');
+  console.log('AI Maestro - WhatsApp Gateway (AMP)');
+  console.log('========================================');
+  console.log(`Port: ${config.port}`);
+  console.log(`Protocol: AMP`);
+  console.log(`Agent: ${config.amp.agentAddress}`);
+  console.log(`Default agent: ${config.amp.defaultAgent}`);
+  console.log(`Tenant: ${config.amp.tenant}`);
+  console.log(`Maestro: ${config.amp.maestroUrl}`);
+  console.log(`Inbox: ${config.amp.inboxDir}`);
+  console.log(`State dir: ${config.whatsapp.stateDir}`);
+  console.log(`DM policy: ${config.whatsapp.dmPolicy}`);
+  console.log(`Allow from: ${config.whatsapp.allowFrom.length > 0 ? config.whatsapp.allowFrom.join(', ') : '(all)'}`);
+  console.log(`Debug: ${config.debug}`);
+
+  // Express server for health checks and management
+  const app = createHttpApp(config);
 
   const server = app.listen(config.port, '127.0.0.1', () => {
     console.log(`[HTTP] Management API on http://127.0.0.1:${config.port}`);
@@ -138,7 +131,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+  });
+}

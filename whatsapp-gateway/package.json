@@ -9,6 +9,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/__tests__/*.test.ts",
     "login": "tsx scripts/login.ts"
   },
   "dependencies": {
