@@ -13,5 +13,7 @@ credentials.yaml
 .claude/
 ai-team/
 # Internal design docs (architecture / mesh detail) — keep out of the public repo
+# CLAUDE.md is a fork-only operator doc; upstream 23blocks-OS has none — mirror that, keep it local
+CLAUDE.md
 teams-gateway/PLAN.md
 teams-gateway/packages-common-PLAN.md
