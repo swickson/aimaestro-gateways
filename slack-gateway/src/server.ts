@@ -19,6 +19,7 @@
 import * as path from 'path';
 import { pathToFileURL } from 'url';
 import express from 'express';
+import type { RequestHandler } from 'express';
 import { App } from '@slack/bolt';
 import { createAuthMiddleware } from '@aimaestro/common/auth.js';
 import { loadConfig } from './config.js';
@@ -69,7 +70,7 @@ export function createHttpApp({
   });
 
   // Auth middleware for management APIs. Fails closed if ADMIN_TOKEN is blank.
-  httpApp.use('/api', createAuthMiddleware(config.adminToken));
+  httpApp.use('/api', createAuthMiddleware(config.adminToken) as unknown as RequestHandler);
 
   // Management APIs
   httpApp.use(
