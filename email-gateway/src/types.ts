@@ -71,6 +71,8 @@ export interface GatewayConfig {
   mandrill: {
     apiKey: string;
     webhookKeys: Record<string, string>;
+    allowedFromDomains: string[];
+    defaultFrom: string;
   };
   routing: {
     routes: Record<string, RouteTarget>;

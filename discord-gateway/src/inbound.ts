@@ -5,12 +5,89 @@
  * to agents via AMP POST /api/v1/route.
  */
 
+import { createHash } from 'crypto';
 import type { Client, Message, TextChannel } from 'discord.js';
-import type { GatewayConfig, AMPRouteRequest } from './types.js';
+import type { GatewayConfig, AMPRouteRequest, ResolvedUser, WatchWebhookEntry } from './types.js';
 import type { AgentResolver } from './agent-resolver.js';
+import type { UserResolver } from './user-resolver.js';
 import type { ThreadStore } from './thread-store.js';
 import { sanitizeDiscordMessage, type SecurityConfig } from './content-security.js';
 import { logEvent } from './api/activity-log.js';
+
+// ---------------------------------------------------------------------------
+// Watch-webhook deduplication
+// ---------------------------------------------------------------------------
+
+// Some upstream Discord webhook producers (notably the Facebook Groups
+// Watcher) double-emit every event within <50ms. We drop the second copy
+// at the gateway because Hale should not draft the same response twice
+// and the memory-retrieval middleware could double-weight reinforced facts.
+const watchDedupSeen = new Map<string, number>();
+
+function isDuplicateWatchMessage(
+  channelId: string,
+  webhookId: string,
+  text: string,
+  windowMs: number
+): boolean {
+  const key = createHash('sha256')
+    .update(`${channelId}::${webhookId}::${text}`)
+    .digest('hex')
+    .slice(0, 16);
+  const now = Date.now();
+  const seenAt = watchDedupSeen.get(key);
+
+  // Sweep stale entries so the Map stays bounded regardless of traffic.
+  for (const [k, ts] of watchDedupSeen) {
+    if (now - ts >= windowMs) watchDedupSeen.delete(k);
+  }
+
+  if (seenAt !== undefined && now - seenAt < windowMs) return true;
+  watchDedupSeen.set(key, now);
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Topic Hints Extraction
+// ---------------------------------------------------------------------------
+
+const STOP_WORDS = new Set([
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+  'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
+  'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during',
+  'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
+  'under', 'again', 'further', 'then', 'once', 'and', 'but', 'or', 'nor',
+  'not', 'so', 'yet', 'both', 'either', 'neither', 'each', 'every', 'all',
+  'any', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'only',
+  'same', 'than', 'too', 'very', 'just', 'because', 'if', 'when', 'where',
+  'how', 'what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those',
+  'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'him', 'his', 'she',
+  'her', 'it', 'its', 'they', 'them', 'their', 'about', 'up',
+]);
+
+/**
+ * Extract lightweight topic hints from message text.
+ * Returns up to 3 keywords, filtered for stop words and short tokens.
+ */
+function extractTopicHints(text: string): string[] {
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+
+  // Count frequency, take top 3
+  const freq = new Map<string, number>();
+  for (const w of words) {
+    freq.set(w, (freq.get(w) || 0) + 1);
+  }
+
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([word]) => word);
+}
 
 /**
  * Parse @AIM:agent-name routing from message text.
@@ -60,13 +137,17 @@ async function sendToAgent(
   displayName: string,
   discordUserId: string,
   securityConfig: SecurityConfig,
-  threadStore: ThreadStore
+  threadStore: ThreadStore,
+  resolvedUser: ResolvedUser | null,
+  isDM: boolean,
+  monitorMode: boolean = false
 ): Promise<void> {
   const { sanitized, trust, flags } = sanitizeDiscordMessage(
     text,
     discordUserId,
     displayName,
-    securityConfig
+    securityConfig,
+    resolvedUser
   );
 
   if (flags.length > 0) {
@@ -81,6 +162,15 @@ async function sendToAgent(
     });
   }
 
+  // Determine if this is a new conversation
+  const recentThread = threadStore.findByChannel(channelId);
+  const conversationTimeoutMs = 30 * 60 * 1000; // 30 minutes
+  const isNewConversation = isDM
+    ? !recentThread || (Date.now() - recentThread.createdAt > conversationTimeoutMs)
+    : true; // Guild @mentions are always treated as new conversations
+
+  const topicHints = extractTopicHints(text);
+
   const ampRequest: AMPRouteRequest = {
     to: targetAddress,
     subject: `Discord message from ${displayName}`,
@@ -89,6 +179,7 @@ async function sendToAgent(
       type: 'request',
       message: sanitized,
       context: {
+        // Legacy fields (kept for backward compatibility)
         channel: {
           type: 'discord',
           sender: displayName,
@@ -106,6 +197,25 @@ async function sendToAgent(
           wrapped: trust.level !== 'operator',
           scanned_at: new Date().toISOString(),
         },
+        // New enriched context (Phase 2)
+        sender: {
+          platformUserId: discordUserId,
+          platform: 'discord',
+          handle: displayName,
+          ...(resolvedUser && {
+            userId: resolvedUser.id,
+            displayName: resolvedUser.displayName,
+            trustLevel: resolvedUser.trustLevel,
+            role: resolvedUser.role,
+          }),
+        },
+        thread: {
+          threadId: channelId,
+          inReplyTo: recentThread?.ampMessageId || null,
+          isNewConversation,
+        },
+        ...(topicHints.length > 0 && { topicHints }),
+        ...(monitorMode && { mode: 'monitor' as const }),
       },
     },
   };
@@ -133,7 +243,9 @@ async function sendToAgent(
 
   const result = await response.json();
 
-  if (result.id) {
+  // Skip thread-store mapping in monitor mode so any accidental reply from the
+  // target agent does not land back in the watched channel.
+  if (result.id && !monitorMode) {
     threadStore.set(result.id, {
       channelId,
       messageId,
@@ -166,15 +278,20 @@ async function routeMessage(
   resolver: AgentResolver,
   securityConfig: SecurityConfig,
   threadStore: ThreadStore,
+  userResolver: UserResolver,
   text: string,
   channelId: string,
   messageId: string,
   displayName: string,
   discordUserId: string,
+  isDM: boolean,
   reply: (text: string) => Promise<void>
 ): Promise<void> {
   const { agent, message } = parseAgentRouting(text, config.amp.defaultAgent);
   const { address } = resolver.lookupAgent(agent);
+
+  // Resolve sender against user directory
+  const resolvedUser = await userResolver.resolve('discord', discordUserId, displayName);
 
   try {
     await sendToAgent(
@@ -186,7 +303,9 @@ async function routeMessage(
       displayName,
       discordUserId,
       securityConfig,
-      threadStore
+      threadStore,
+      resolvedUser,
+      isDM
     );
   } catch (error) {
     const errMsg = (error as Error).message;
@@ -209,6 +328,53 @@ async function routeMessage(
 }
 
 /**
+ * Lookup a watch-webhook config entry for a message, if any.
+ * Matches on both channelId and webhookId — either alone is not enough.
+ */
+function matchWatchWebhook(
+  message: Message,
+  entries: WatchWebhookEntry[]
+): WatchWebhookEntry | null {
+  if (!message.webhookId || entries.length === 0) return null;
+  return (
+    entries.find(
+      e => e.channelId === message.channelId && e.webhookId === message.webhookId
+    ) || null
+  );
+}
+
+/**
+ * Extract routable text from a watch-webhook message.
+ *
+ * Webhook-posted content often lives entirely in rich embeds (title,
+ * description, fields) rather than the plain `content` field — that was
+ * the gap that caused production Facebook watcher posts to be dropped
+ * silently. We concatenate content + every embed's title/description/
+ * fields so the target agent gets the full post.
+ *
+ * Only used in the watch branch; the normal (human) inbound path keeps
+ * using message.content to avoid over-eager embed slurping.
+ */
+function extractWatchText(message: Message): string {
+  const parts: string[] = [];
+
+  const content = message.content?.trim();
+  if (content) parts.push(content);
+
+  for (const embed of message.embeds) {
+    const embedParts: string[] = [];
+    if (embed.title) embedParts.push(embed.title);
+    if (embed.description) embedParts.push(embed.description);
+    for (const field of embed.fields) {
+      embedParts.push(`${field.name}: ${field.value}`);
+    }
+    if (embedParts.length > 0) parts.push(embedParts.join('\n'));
+  }
+
+  return parts.join('\n\n').trim();
+}
+
+/**
  * Register all inbound Discord event handlers.
  */
 export function registerInboundHandlers(
@@ -216,9 +382,65 @@ export function registerInboundHandlers(
   config: GatewayConfig,
   resolver: AgentResolver,
   securityConfig: SecurityConfig,
-  threadStore: ThreadStore
+  threadStore: ThreadStore,
+  userResolver: UserResolver
 ): void {
   client.on('messageCreate', async (message: Message) => {
+    // Watch-webhook fast path: route messages from whitelisted webhooks to a
+    // fixed agent in monitor mode (no reactions, no reply, no threadStore).
+    const watch = matchWatchWebhook(message, config.watchWebhooks);
+    if (watch) {
+      const text = extractWatchText(message);
+      if (!text) return;
+
+      const webhookName =
+        message.author?.username || `webhook:${message.webhookId}`;
+
+      if (
+        isDuplicateWatchMessage(
+          message.channelId,
+          message.webhookId!,
+          text,
+          config.watchDedupWindowMs
+        )
+      ) {
+        console.log(
+          `[Discord <- watch dedup] Suppressed duplicate from ${webhookName}: ${text.substring(0, 50)}...`
+        );
+        return;
+      }
+
+      console.log(
+        `[Discord <- watch] #${(message.channel as TextChannel).name || message.channelId} from ${webhookName} -> ${watch.targetAgent}: ${text.substring(0, 50)}...`
+      );
+
+      try {
+        const { address } = resolver.lookupAgent(watch.targetAgent);
+        await sendToAgent(
+          config,
+          address,
+          text,
+          message.channelId,
+          message.id,
+          webhookName,
+          message.webhookId!,
+          securityConfig,
+          threadStore,
+          null,
+          false,
+          true
+        );
+      } catch (error) {
+        console.error('[WATCH] Failed to route webhook message:', error);
+        logEvent('error', `Watch-webhook route failed: ${webhookName}`, {
+          from: webhookName,
+          to: watch.targetAgent,
+          error: (error as Error).message,
+        });
+      }
+      return;
+    }
+
     if (message.author.bot) return;
 
     const isDM = !message.guild;
@@ -254,11 +476,13 @@ export function registerInboundHandlers(
         resolver,
         securityConfig,
         threadStore,
+        userResolver,
         text,
         message.channelId,
         message.id,
         displayName,
         message.author.id,
+        isDM,
         reply
       );
     } catch (error) {

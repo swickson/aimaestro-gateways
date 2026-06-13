@@ -1,0 +1,25 @@
+{
+  "name": "teams-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI Maestro Teams gateway — multi-bot (per-bot AMP identity) Microsoft Teams <-> AMP bridge. Port 3024. Skeleton: infra + first identity (inbound/outbound stubbed).",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/__tests__/*.test.ts"
+  },
+  "dependencies": {
+    "@microsoft/teams.api": "2.0.12",
+    "@microsoft/teams.apps": "2.0.12",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.22.4",
+    "typescript": "^5.7.2"
+  }
+}

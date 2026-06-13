@@ -230,6 +230,21 @@ async function scanInbox(config: GatewayConfig): Promise<void> {
           continue;
         }
 
+        // Validate sender domain against allowlist
+        if (config.mandrill.allowedFromDomains.length > 0) {
+          const fromDomain = reply.from.split('@')[1]?.toLowerCase();
+          if (!fromDomain || !config.mandrill.allowedFromDomains.includes(fromDomain)) {
+            console.warn(`[OUTBOUND] Rejected sender domain: ${reply.from} (allowed: ${config.mandrill.allowedFromDomains.join(', ')})`);
+            logEvent('security', `Rejected outbound email with unauthorized sender: ${reply.from}`, {
+              from: reply.from,
+              to: reply.to,
+              error: `Domain not in allowlist: ${config.mandrill.allowedFromDomains.join(', ')}`,
+            });
+            reply.from = config.mandrill.defaultFrom;
+            console.log(`[OUTBOUND] Rewrote sender to: ${reply.from}`);
+          }
+        }
+
         const attachCount = reply.attachments?.length || 0;
         const ccInfo = reply.cc ? ` (CC: ${reply.cc})` : '';
         console.log(`[OUTBOUND] Sending: ${reply.from} -> ${reply.to}${ccInfo} | ${reply.subject}${attachCount > 0 ? ` (${attachCount} attachment${attachCount > 1 ? 's' : ''})` : ''}`);

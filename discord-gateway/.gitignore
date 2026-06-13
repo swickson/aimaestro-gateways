@@ -4,3 +4,6 @@ dist/
 .env.*
 !.env.example
 start-*.sh
+test-watch-webhook.sh
+replay-*.sh
+thread-store.json

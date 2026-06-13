@@ -13,20 +13,18 @@ import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import { loadConfig } from './config.js';
 import { loadSecurityConfig, type SecurityConfig } from './content-security.js';
 import { createAgentResolver } from './agent-resolver.js';
+import { createUserResolver } from './user-resolver.js';
 import { ThreadStore } from './thread-store.js';
 import { registerInboundHandlers } from './inbound.js';
 import { startOutboundPoller } from './outbound.js';
 import { createConfigRouter } from './api/config-api.js';
 import { createActivityRouter } from './api/activity-api.js';
 import { createStatsRouter } from './api/stats-api.js';
+import { createDMRouter } from './api/dm-api.js';
 import type { GatewayConfig } from './types.js';
 
 function authMiddleware(adminToken: string) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!adminToken) {
-      console.warn('[AUTH] No ADMIN_TOKEN configured - API access is unrestricted');
-      return next();
-    }
     const auth = req.headers.authorization || '';
     const expected = `Bearer ${adminToken}`;
     if (auth.length === expected.length && timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
@@ -58,7 +56,14 @@ async function main(): Promise<void> {
   console.log(`Maestro: ${config.amp.maestroUrl}`);
   console.log(`Inbox: ${config.amp.inboxDir}`);
   console.log(`Poll interval: ${config.polling.intervalMs}ms`);
-  console.log(`Security: ${securityConfig.operatorDiscordIds.length} operator Discord ID(s) whitelisted`);
+  console.log(`Security: ${securityConfig.operatorDiscordIds.length} operator Discord ID(s) whitelisted (legacy fallback)`);
+  console.log(`User directory: ${config.amp.maestroUrl}/api/users/resolve (cache TTL: ${config.cache.userTtlMs}ms)`);
+  if (config.watchWebhooks.length > 0) {
+    console.log(`Watch webhooks: ${config.watchWebhooks.length} configured`);
+    for (const w of config.watchWebhooks) {
+      console.log(`  - channel ${w.channelId} / webhook ${w.webhookId} -> ${w.targetAgent}`);
+    }
+  }
   console.log(`Debug: ${config.debug}`);
 
   // Create Discord.js client
@@ -75,6 +80,9 @@ async function main(): Promise<void> {
   // Create agent resolver
   const resolver = createAgentResolver(config);
 
+  // Create user resolver (user directory integration)
+  const userResolver = createUserResolver(config);
+
   // Create thread store with persistence
   const threadStore = new ThreadStore();
   const threadStorePath = path.resolve(
@@ -86,7 +94,7 @@ async function main(): Promise<void> {
   threadStore.startCleanup(60000);
 
   // Register Discord event handlers
-  registerInboundHandlers(client, config, resolver, securityConfig, threadStore);
+  registerInboundHandlers(client, config, resolver, securityConfig, threadStore, userResolver);
 
   // Discord ready event
   client.once('ready', () => {
@@ -148,9 +156,16 @@ async function main(): Promise<void> {
     )
   );
 
-  const server = httpApp.listen(config.port, '127.0.0.1', () => {
-    console.log(`[HTTP] Management API on http://127.0.0.1:${config.port}`);
-  });
+  httpApp.use(
+    '/api/gateway/dm',
+    createDMRouter(() => client)
+  );
+
+  const servers = config.host.map((host) =>
+    httpApp.listen(config.port, host, () => {
+      console.log(`[HTTP] Management API on http://${host}:${config.port}`);
+    })
+  );
 
   console.log('');
   console.log('Endpoints:');
@@ -158,6 +173,7 @@ async function main(): Promise<void> {
   console.log('  GET  /api/config    - Gateway config');
   console.log('  GET  /api/stats     - Gateway metrics');
   console.log('  GET  /api/activity  - Activity log');
+  console.log('  POST /api/gateway/dm - Outbound DM delivery');
   console.log('========================================');
   console.log('');
   console.log('Gateway ready! (AMP Protocol)');
@@ -180,10 +196,12 @@ async function main(): Promise<void> {
     console.log('[SHUTDOWN] Thread store saved');
 
     resolver.clearCaches();
+    userResolver.clearCache();
 
-    server.close(() => {
-      console.log('[SHUTDOWN] HTTP server closed');
-    });
+    for (const s of servers) {
+      s.close(() => {});
+    }
+    console.log('[SHUTDOWN] HTTP servers closed');
 
     try {
       client.destroy();

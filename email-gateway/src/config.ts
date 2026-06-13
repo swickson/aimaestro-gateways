@@ -149,6 +149,9 @@ export async function loadConfig(): Promise<GatewayConfig> {
     mandrill: {
       apiKey: credentials.mandrill.api_key,
       webhookKeys,
+      allowedFromDomains: (credentials.mandrill.allowed_from_domains as string[] || [])
+        .map((d: string) => d.toLowerCase()),
+      defaultFrom: credentials.mandrill.default_from || `noreply@${process.env.EMAIL_BASE_DOMAIN || 'example.com'}`,
     },
     routing: {
       routes,
