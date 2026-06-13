@@ -1,17 +1,25 @@
 {
   "name": "aimaestro-gateways",
   "private": true,
+  "workspaces": [
+    "packages/common"
+  ],
   "scripts": {
-    "lint": "eslint '*/src/**/*.ts'",
+    "lint": "eslint '*/src/**/*.ts' 'packages/*/src/**/*.ts'",
     "typecheck:discord": "cd discord-gateway && npx tsc --noEmit",
     "typecheck:slack": "cd slack-gateway && npx tsc --noEmit",
     "typecheck:email": "cd email-gateway && npx tsc --noEmit",
     "typecheck:whatsapp": "cd whatsapp-gateway && npx tsc --noEmit",
-    "typecheck": "npm run typecheck:discord && npm run typecheck:slack",
-    "test": "cd discord-gateway && npm test"
+    "typecheck:teams": "cd teams-gateway && npx tsc --noEmit",
+    "typecheck:common": "cd packages/common && npx tsc --noEmit",
+    "typecheck": "npm run typecheck:discord && npm run typecheck:slack && npm run typecheck:teams && npm run typecheck:common",
+    "test:discord": "cd discord-gateway && npm test",
+    "test:teams": "cd teams-gateway && npm test",
+    "test": "npm run test:discord && npm run test:teams"
   },
   "devDependencies": {
-    "eslint": "^9.0.0",
-    "typescript-eslint": "^8.0.0"
+    "eslint": "^9.39.4",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.59.1"
   }
 }

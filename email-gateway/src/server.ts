@@ -358,8 +358,10 @@ async function main(): Promise<void> {
       } else if (!signature && webhookKey) {
         console.warn(`[SECURITY] No signature provided for tenant ${tenant}`);
         return res.status(403).json({ error: 'Missing webhook signature' });
-      } else if (!signature && !webhookKey) {
-        console.warn(`[${tenant}] Warning: No webhook key configured`);
+      } else {
+        console.error(`[SECURITY] Rejected tenant ${tenant}: webhook key not configured`);
+        logEvent('security', `Rejected webhook for tenant ${tenant}: no webhook key configured`, { tenant });
+        return res.status(403).json({ error: 'Webhook verification failed' });
       }
 
       const events = JSON.parse(eventsRaw);

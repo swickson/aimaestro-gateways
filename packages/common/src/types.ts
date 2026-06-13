@@ -1,45 +1,50 @@
 /**
- * Discord Gateway - Type Definitions (AMP Protocol)
+ * Shared AMP + User-directory type definitions.
+ *
+ * Extracted from the per-gateway `types.ts` copies. Only the platform-agnostic
+ * AMP protocol and user-directory types live here. Platform-specific types stay
+ * gateway-local by design (per packages/common-PLAN §2 boundary rules):
+ *   - `GatewayConfig`  — differs per platform (Discord token vs Teams AAD creds)
+ *   - `ThreadContext`  — Discord channel/message IDs vs Teams ConversationReference
+ *   - `WatchWebhookEntry` etc. — Discord-only
  */
 
 // ---------------------------------------------------------------------------
-// Gateway Configuration
+// Enriched envelope context — the gateway -> Maestro CONTRACT (locked shape)
 // ---------------------------------------------------------------------------
 
-export interface WatchWebhookEntry {
-  channelId: string;
-  webhookId: string;
-  targetAgent: string;
+/**
+ * Producer-side enriched context attached to a routed message's payload. This is
+ * the LOCKED gateway -> Maestro contract — Maestro core signed it off verbatim against
+ * the Maestro consumer (amp-service.ts) on 2026-06-09. Do NOT deviate from the
+ * field shapes below; Maestro's memory-retrieval middleware reads them.
+ *
+ * `platformUserId` + `platform` are the load-bearing REQUIRED pair (this killed
+ * the earlier `userId`-vs-`platformUserId` drift — there is deliberately NO
+ * `userId` field here). `topicHints` is capped at 3 PRODUCER-SIDE; Maestro does
+ * NOT enforce the cap.
+ */
+export interface EnrichedSender {
+  platformUserId: string;
+  platform: string;
+  displayName?: string;
+  handle?: string;
+  trustLevel?: string;
+  role?: string;
 }
 
-export interface GatewayConfig {
-  port: number;
-  host: string[];
-  discord: {
-    botToken: string;
-  };
-  amp: {
-    apiKey: string;
-    agentAddress: string;
-    maestroUrl: string;
-    defaultAgent: string;
-    tenant: string;
-    inboxDir: string;
-  };
-  cache: {
-    agentTtlMs: number;
-    slackUserTtlMs: number;
-    userTtlMs: number;
-  };
-  polling: {
-    intervalMs: number;
-    timeoutMs: number;
-  };
-  watchWebhooks: WatchWebhookEntry[];
-  /** Drop duplicate watch-webhook messages seen within this window (ms). 0 disables. */
-  watchDedupWindowMs: number;
-  debug: boolean;
-  adminToken: string;
+export interface EnrichedThread {
+  threadId: string;
+  /** Prior AMP message id in this thread, when known. Omitted (never `null`) otherwise. */
+  inReplyTo?: string;
+  isNewConversation: boolean;
+}
+
+export interface EnrichedContext {
+  sender: EnrichedSender;
+  thread: EnrichedThread;
+  /** Up to 3 topic keywords; capped producer-side. */
+  topicHints: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -63,7 +68,7 @@ export interface AMPEnvelope {
 export interface AMPPayload {
   type: string;
   message: string;
-  context?: Record<string, unknown> | null;
+  context?: EnrichedContext | null;
 }
 
 export interface AMPMessage {
@@ -89,7 +94,7 @@ export interface AMPRouteRequest {
   payload: {
     type: string;
     message: string;
-    context?: Record<string, unknown>;
+    context?: EnrichedContext;
   };
 }
 
@@ -100,19 +105,6 @@ export interface AMPRouteResponse {
   delivered_at?: string;
   error?: string;
   message?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Thread Context (maps AMP message IDs to Discord channels)
-// ---------------------------------------------------------------------------
-
-export interface ThreadContext {
-  channelId: string;
-  messageId: string;
-  user: string;
-  userName: string;
-  ampMessageId: string;
-  createdAt: number;
 }
 
 // ---------------------------------------------------------------------------
