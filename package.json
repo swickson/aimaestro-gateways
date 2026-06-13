@@ -12,10 +12,14 @@
     "typecheck:whatsapp": "cd whatsapp-gateway && npx tsc --noEmit",
     "typecheck:teams": "cd teams-gateway && npx tsc --noEmit",
     "typecheck:common": "cd packages/common && npx tsc --noEmit",
-    "typecheck": "npm run typecheck:discord && npm run typecheck:slack && npm run typecheck:teams && npm run typecheck:common",
+    "typecheck": "npm run typecheck:discord && npm run typecheck:slack && npm run typecheck:email && npm run typecheck:whatsapp && npm run typecheck:teams && npm run typecheck:common",
     "test:discord": "cd discord-gateway && npm test",
+    "test:slack": "cd slack-gateway && npm test",
+    "test:email": "cd email-gateway && npm test",
+    "test:whatsapp": "cd whatsapp-gateway && npm test",
     "test:teams": "cd teams-gateway && npm test",
-    "test": "npm run test:discord && npm run test:teams"
+    "test:common": "cd packages/common && npm test",
+    "test": "npm run test:discord && npm run test:slack && npm run test:email && npm run test:whatsapp && npm run test:teams && npm run test:common"
   },
   "devDependencies": {
     "eslint": "^9.39.4",
