@@ -69,6 +69,30 @@ describe('user-resolver Phase 5 shapes', () => {
     });
   });
 
+  it('first-contact also PATCHes /last-seen after auto-create (shape b every inbound)', async () => {
+    const calls = installFetch((call) => {
+      if (call.url.includes('/api/users/resolve')) return { ok: false, status: 404 };
+      if (call.url.includes('/api/users/auto-create')) {
+        return { ok: true, status: 200, json: { user: { id: 'u-1', displayName: 'Alice', role: 'external' } } };
+      }
+      if (call.url.endsWith('/api/users/u-1/last-seen')) return { ok: true, status: 200 };
+      return { ok: false, status: 500 };
+    });
+
+    const resolver = createUserResolver({ maestroUrl: 'http://maestro', apiKey: 'k' });
+    await resolver.resolve('aad-1', 'Alice', 'tenant-9', 'echo');
+    await tick();
+
+    const lastSeen = calls.find((c) => c.url.endsWith('/api/users/u-1/last-seen'));
+    assert.ok(lastSeen, 'last-seen PATCH fired on first-contact auto-create');
+    assert.equal(lastSeen?.method, 'PATCH');
+    assert.deepEqual(lastSeen?.body, {
+      platform: 'teams',
+      platformUserId: 'aad-1',
+      context: { botSlug: 'echo' },
+    });
+  });
+
   it('every-inbound (shape b) PATCHes /last-seen with the exact body', async () => {
     const calls = installFetch((call) => {
       if (call.url.includes('/api/users/resolve')) {
