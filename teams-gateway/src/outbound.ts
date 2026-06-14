@@ -51,8 +51,17 @@ export interface OutboundBot {
   slug: string;
   /** Absolute path to this bot's AMP inbox dir (sender-nested `*.json` files). */
   inboxDir: string;
-  /** Configured Maestro base URL; outbound attachment URLs must resolve to this origin. */
+  /** Configured Maestro base URL (this gateway's own AMP endpoint). */
   maestroUrl: string;
+  /**
+   * Trusted-origin allowlist for outbound attachment download urls: the union of
+   * this gateway's `maestroUrl` origin and every ENABLED mesh-host origin from
+   * `~/.aimaestro/hosts.json` (loaded once at startup). A signed download url is
+   * accepted ONLY when its `origin` is in this set — signed urls carry the ORIGIN
+   * host's Tailscale origin (`getSelfHost().url`), not necessarily `maestroUrl`.
+   * Restricting to known mesh hosts keeps SSRF closed (never an arbitrary origin).
+   */
+  allowedOrigins: ReadonlySet<string>;
   /**
    * The bot adapter's configured `serviceUrl`. Used ONLY to log a Fork-O1
    * observability warning when it diverges from the stored reference's serviceUrl
@@ -112,14 +121,29 @@ class AttachmentOverCapError extends Error {}
  * type is NOT a runtime guarantee. This function is TOTAL: it FIRST proves `att` is a
  * non-null, non-array object before reading any field, so it never throws a TypeError
  * on a hostile shape — it always returns a drop reason instead. Every field needed for
- * delivery is then runtime-checked. The url must be same-origin as the configured
- * Maestro AND its path EXACTLY `/api/v1/attachments/<id>/download` with `<id>` === the
- * descriptor's own id — closing the "same-origin but arbitrary internal path" (e.g.
- * `/api/v1/agents`) SSRF angle on top of Whistler's origin pin.
+ * delivery is then runtime-checked. The url's origin must be in the trusted mesh-host
+ * `allowedOrigins` set AND its path EXACTLY `/api/v1/attachments/<id>/download` with
+ * `<id>` === the descriptor's own id — closing the "trusted-origin but arbitrary
+ * internal path" (e.g. `/api/v1/agents`) SSRF angle on top of the origin allowlist.
+ *
+ * KIND/DIGEST tolerate the agent `amp-send --attach` WIRE form (Watson-locked): the
+ * CLI may omit `kind` (only an explicit `legacy` is rejected — mirrors Maestro
+ * `/route`), and a digest may carry an optional `sha256:` prefix. Shape inference
+ * requires id + url(+origin+path+id-match) + digest + scan_status + size + filename +
+ * content_type — all present/valid — so a non-amp-v1 descriptor still can't slip through.
  */
-function validateOutboundDescriptor(
+const SHA256_HEX = /^[0-9a-f]{64}$/i;
+
+/** Validate the digest field, tolerating an optional case-insensitive `sha256:` prefix. */
+function isValidDigest(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const hex = value.replace(/^sha256:/i, '');
+  return SHA256_HEX.test(hex);
+}
+
+export function validateOutboundDescriptor(
   att: unknown,
-  maestroOrigin: string,
+  allowedOrigins: ReadonlySet<string>,
   policy: AttachmentPolicy,
 ): string | null {
   // FIRST guard — prove `att` is a non-null, non-array object before any field
@@ -131,7 +155,9 @@ function validateOutboundDescriptor(
     return `descriptor is not an object (got ${got})`;
   }
   const d = att as Record<string, unknown>;
-  if (d.kind !== 'amp-v1') return `kind '${String(d.kind)}' is not amp-v1`;
+  // KIND: reject ONLY an explicit `legacy`; absent/amp-v1/other infer amp-v1 by shape
+  // (the CLI wire form omits kind; Maestro /route itself only hard-rejects 'legacy').
+  if (d.kind === 'legacy') return "kind 'legacy' is not routable";
   if (d.scan_status !== 'clean' && d.scan_status !== 'basic_clean') {
     return `scan_status '${String(d.scan_status)}' is not routable`;
   }
@@ -140,6 +166,7 @@ function validateOutboundDescriptor(
   if (typeof d.content_type !== 'string' || d.content_type.trim() === '') {
     return 'missing/empty content_type';
   }
+  if (!isValidDigest(d.digest)) return `invalid/missing digest '${String(d.digest)}'`;
   if (typeof d.size !== 'number' || !Number.isFinite(d.size) || d.size <= 0) {
     return `invalid size ${String(d.size)}`;
   }
@@ -155,7 +182,7 @@ function validateOutboundDescriptor(
   } catch {
     return 'unparseable url';
   }
-  if (url.origin !== maestroOrigin) return `url origin '${url.origin}' is not Maestro`;
+  if (!allowedOrigins.has(url.origin)) return `url origin '${url.origin}' is not a trusted mesh host`;
   const expectedPath = `/api/v1/attachments/${d.id}/download`;
   if (url.pathname !== expectedPath) return `url path '${url.pathname}' != '${expectedPath}'`;
   return null;
@@ -221,7 +248,6 @@ async function pullOutboundAttachments(
   policy: AttachmentPolicy,
 ): Promise<PullResult> {
   const result: PullResult = { pulled: [], validationDrops: 0, pullFailures: 0 };
-  const maestroOrigin = new URL(bot.maestroUrl).origin;
 
   // Count cap: never pull more than maxCount; the extras are a policy DROP.
   let toProcess = declared;
@@ -233,7 +259,7 @@ async function pullOutboundAttachments(
   }
 
   for (const att of toProcess) {
-    const invalid = validateOutboundDescriptor(att, maestroOrigin, policy);
+    const invalid = validateOutboundDescriptor(att, bot.allowedOrigins, policy);
     if (invalid) {
       // Malformed/hostile descriptor — DROP it (won't self-heal). Loud, never silent.
       // `att` may be a non-object here, so extract any filename defensively (no throw).

@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import { Cache } from '@aimaestro/common/cache.js';
 import { handleInbound, type InboundActivity, type InboundDeps } from '../inbound.js';
 import { createThreadStore } from '../thread-store.js';
-import type { AMPRouteRequest, AttachmentPolicy } from '../types.js';
+import type { AMPRouteRequest, AttachmentPolicy, OperatorAadRef } from '../types.js';
 import type { RawInboundAttachment } from '../attachments-inbound.js';
 
 const POLICY: AttachmentPolicy = { maxBytes: 26_214_400, maxCount: 10, denyContentTypes: [] };
@@ -96,6 +96,13 @@ function activity(text: string, attachments?: RawInboundAttachment[], downloader
 const file: RawInboundAttachment = { name: 'doc.pdf', contentType: 'application/pdf', downloadUrl: 'https://teams.test/dl' };
 const goodDownloader = async () => new Uint8Array([1, 2, 3, 4]);
 
+// The activity() helper's sender is (tenant-1, aad-1). As an OPERATOR they bypass the
+// scanner, so empty text stays empty — the exact live-repro condition (Shane DM'd a
+// photo) where the empty-message guard must fire. (An EXTERNAL sender's empty text is
+// wrapped in a non-empty <external-content> envelope, so it never hits the 400 and the
+// placeholder is intentionally not needed.)
+const OPERATOR: OperatorAadRef[] = [{ tenantId: 'tenant-1', aadObjectId: 'aad-1' }];
+
 describe('w3 inbound route-payload citation', () => {
   it('cites a successfully-ingested attachment in payload.attachments', async () => {
     const routed: AMPRouteRequest[] = [];
@@ -111,14 +118,53 @@ describe('w3 inbound route-payload citation', () => {
     assert.equal(a.url, 'https://maestro.test/api/v1/attachments/att-1/download?sig=x');
   });
 
-  it('an attachment-only message (empty text) still routes with the attachment cited', async () => {
+  it('Part B — attachment-only (empty text) that SUCCEEDS: cites the attachment AND substitutes a non-empty placeholder', async () => {
     const routed: AMPRouteRequest[] = [];
     installFetch({ routed });
-    const result = await handleInbound(activity('', [file], goodDownloader), deps());
+    const result = await handleInbound(activity('', [file], goodDownloader), deps({ operatorAadObjectIds: OPERATOR }));
 
     assert.equal(result, 'routed');
     assert.equal(routed.length, 1);
     assert.equal(routed[0].payload.attachments?.length, 1);
+    // Mode-2 success: empty text would 400 even though the attachment uploaded.
+    assert.notEqual(routed[0].payload.message.trim(), '');
+    assert.match(routed[0].payload.message, /attachment/i);
+    assert.doesNotMatch(routed[0].payload.message, /could not be retrieved/i);
+  });
+
+  it('Part B — attachment-only (empty text) whose attachments ALL FAIL: routes a non-empty "could not retrieve" placeholder, no attachments field', async () => {
+    const routed: AMPRouteRequest[] = [];
+    installFetch({ routed });
+    const failingDownloader = async () => { throw new Error('download failed (401)'); };
+    const result = await handleInbound(activity('', [file], failingDownloader), deps({ operatorAadObjectIds: OPERATOR }));
+
+    assert.equal(result, 'routed');
+    assert.equal(routed.length, 1);
+    assert.notEqual(routed[0].payload.message.trim(), ''); // never the empty-message 400
+    assert.match(routed[0].payload.message, /could not be retrieved/i);
+    assert.equal(routed[0].payload.attachments, undefined);
+  });
+
+  it('Part B — placeholder only fires on EMPTY text: a caption survives unchanged even when the attachment fails', async () => {
+    const routed: AMPRouteRequest[] = [];
+    installFetch({ routed });
+    const failingDownloader = async () => { throw new Error('download failed (401)'); };
+    const result = await handleInbound(activity('look at this photo', [file], failingDownloader), deps());
+
+    assert.equal(result, 'routed');
+    assert.match(routed[0].payload.message, /look at this photo/);
+    assert.doesNotMatch(routed[0].payload.message, /could not be retrieved/i);
+  });
+
+  it('Part B invariant — no attachment-bearing message ever routes an empty payload.message', async () => {
+    const sink: AMPRouteRequest[] = [];
+    const cases: Array<() => Promise<void>> = [
+      async () => { installFetch({ routed: sink }); await handleInbound(activity('', [file], goodDownloader), deps({ operatorAadObjectIds: OPERATOR })); },
+      async () => { installFetch({ routed: sink }); await handleInbound(activity('   ', [file], async () => { throw new Error('boom'); }), deps({ operatorAadObjectIds: OPERATOR })); },
+    ];
+    for (const run of cases) await run();
+    assert.equal(sink.length, 2);
+    for (const r of sink) assert.notEqual(r.payload.message.trim(), '');
   });
 
   it('FAIL-OPEN: a failed ingest still routes the text with NO attachments field', async () => {
