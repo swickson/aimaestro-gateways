@@ -162,7 +162,7 @@ export async function handleInbound(
   // 3. Resolve sender against the Maestro user directory (auto-create on miss).
   //    Pass the activity tenant so an auto-created teams mapping is tenant-bound
   //    (enables tenant-scoped directory-operator trust on later resolves).
-  const resolvedUser = await deps.userResolver.resolve(platformUserId, displayName, activity.tenantId);
+  const resolvedUser = await deps.userResolver.resolve(platformUserId, displayName, activity.tenantId, bot.slug);
 
   // 4. Tenant-scoped trust (user directory preferred; legacy env fallback requires
   //    a (tenantId, aadObjectId) match; unknown/missing tenant fails closed).
@@ -245,6 +245,10 @@ export async function handleInbound(
     botSlug: bot.slug,
     conversationId: activity.conversationId,
     ampMessageId: result.id,
+    // TARGET user for a future proactive DM — the same canonical id used as the
+    // directory key above (aadObjectId, BF account-id fallback), so a Maestro DM's
+    // `platformUserId` resolves this entry via the by-user index.
+    aadObjectId: platformUserId,
     context: {
       reference: activity.reference,
       rootActivityId: activity.activityId,

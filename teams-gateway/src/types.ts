@@ -71,7 +71,32 @@ export interface OperatorAadRef {
  */
 export interface TeamsPlatformContext {
   /** Azure AD tenant the sender's Teams mapping is bound to (tenant-scoped trust). */
-  tenantId: string;
+  tenantId?: string;
+  /**
+   * Slug of the bot the user most recently messaged (Phase 5). Maestro stores this
+   * verbatim and passes it back as the DM `botSlug`, so a proactive notify reaches
+   * the user under the bot they last talked to (most-recent-bot tiebreak). Written
+   * on auto-create (shape a) and refreshed every inbound via `/last-seen` (shape b).
+   */
+  botSlug?: string;
+}
+
+/**
+ * Body of a proactive DM request (`POST /api/gateway/dm`, Phase 5). LOCKED with
+ * Maestro: the caller passes `platformUserId` (the target's AAD object id) and,
+ * optionally, the `botSlug` to send under — Maestro derives it from the user's
+ * stored `context.botSlug`. Absent `botSlug` falls back to the gateway's by-user
+ * last-seen bot. Teams-local (the `botSlug`/Teams shape is not shared).
+ */
+export interface DmRequest {
+  /** Target user's AAD object id (the directory `platformUserId`). */
+  platformUserId: string;
+  /** Caller-pinned sending bot. Omit to use the user's most-recently-seen bot. */
+  botSlug?: string;
+  /** The message text to deliver. */
+  message: string;
+  /** Optional subject, prepended as a bold leading line before chunking. */
+  subject?: string;
 }
 
 export interface GatewayConfig {
