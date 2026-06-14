@@ -40,6 +40,7 @@ import { createThreadStore, type ThreadStore } from './thread-store.js';
 import { createDmRouter } from './dm.js';
 import { createUserResolver, type UserResolver } from './user-resolver.js';
 import { startOutboundPoller, type OutboundBot } from './outbound.js';
+import { loadMeshOrigins } from './mesh-hosts.js';
 import { restoreThreadStore, saveThreadStore, startSnapshotTimer } from './thread-persistence.js';
 import type { GatewayConfig } from './types.js';
 
@@ -280,7 +281,16 @@ function buildOutboundBots(
   config: GatewayConfig,
   registrations: Map<string, BotRegistration>,
   apps: Map<string, App>,
+  meshOrigins: ReadonlySet<string>,
 ): OutboundBot[] {
+  // Trusted-origin allowlist for outbound attachment pulls: this gateway's own
+  // maestroUrl origin (baseline — keeps same-host config working + degrades safely
+  // when hosts.json is absent) UNION the enabled mesh-host origins. Computed once;
+  // a hosts.json change needs a gateway restart to take effect.
+  const allowedOrigins: ReadonlySet<string> = new Set([
+    new URL(config.amp.maestroUrl).origin,
+    ...meshOrigins,
+  ]);
   const bots: OutboundBot[] = [];
   for (const bot of config.bots) {
     const registration = registrations.get(bot.slug);
@@ -290,6 +300,7 @@ function buildOutboundBots(
       slug: bot.slug,
       inboxDir: registration.inboxDir,
       maestroUrl: config.amp.maestroUrl,
+      allowedOrigins,
       configuredServiceUrl: app.api.serviceUrl,
       send: async (conversationId, text, markdown, attachments) => {
         await app.send(conversationId, {
@@ -466,7 +477,21 @@ async function main(): Promise<void> {
   // Outbound delivery (Phase 3): poll each registered bot's AMP inbox for agent
   // replies and post them back under that bot. Under dry-run nothing registered,
   // so there are no inboxes to poll and the poller is not started.
-  const outboundBots = buildOutboundBots(config, registrations, apps);
+  // Load the trusted mesh-host origin allowlist ONCE at startup (restart to refresh).
+  // Outbound attachment download urls are accepted only when their origin is in this
+  // set ∪ the maestroUrl origin. An EMPTY mesh set means signed urls carrying a remote
+  // host's Tailscale origin will be rejected — i.e. outbound attachments are effectively
+  // OFF — so warn loud and unmistakably in the startup log.
+  const meshOrigins = loadMeshOrigins();
+  if (meshOrigins.size === 0) {
+    console.warn(
+      '[MESH] ⚠️  NO mesh-host origins loaded — OUTBOUND ATTACHMENTS to remote/mesh hosts are DISABLED ' +
+        '(only this gateway\'s own maestroUrl origin is trusted). Fix ~/.aimaestro/hosts.json and restart to enable.',
+    );
+  } else {
+    console.log(`[MESH] trusted outbound attachment origins: ${[...meshOrigins].join(', ')}`);
+  }
+  const outboundBots = buildOutboundBots(config, registrations, apps, meshOrigins);
   let stopOutbound: (() => void) | null = null;
   let stopSnapshot: (() => void) | null = null;
   if (outboundBots.length > 0) {
