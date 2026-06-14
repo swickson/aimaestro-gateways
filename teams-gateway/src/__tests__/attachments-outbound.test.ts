@@ -96,6 +96,24 @@ function writeReply(inboxDir: string, message: string, attachments?: AMPAttachme
   return filePath;
 }
 
+/**
+ * Write a reply whose `payload.attachments` is an ARBITRARY array — including hostile
+ * non-object elements (`null`, strings, nested arrays) that the typed `writeReply`
+ * cannot express. `payload.attachments` is agent-controlled JSON, so the gateway must
+ * survive any element shape without throwing.
+ */
+function writeRawReply(inboxDir: string, message: string, attachments: unknown[]): string {
+  const senderDir = path.join(inboxDir, 'agent-one_example_aimaestro_local');
+  fs.mkdirSync(senderDir, { recursive: true });
+  const filePath = path.join(senderDir, 'reply.json');
+  const msg = {
+    envelope: { id: 'reply-1', from: 'agent-one@example.aimaestro.local', to: 'teams-maestro-bot@example.aimaestro.local', timestamp: '2026-06-14T00:00:00.000Z', in_reply_to: 'amp-inbound-1' },
+    payload: { type: 'response', message, attachments },
+  };
+  fs.writeFileSync(filePath, JSON.stringify(msg), 'utf-8');
+  return filePath;
+}
+
 interface SentRecord {
   text: string;
   attachments?: OutboundAttachment[];
@@ -392,5 +410,56 @@ describe('w3 outbound attachment hardening (descriptor trust)', () => {
     assert.equal(withAttach.length, 1);
     assert.equal(withAttach[0].attachments![0].bytes.byteLength, 4);
     assert.equal(fs.existsSync(filePath), false);
+  });
+
+  // FIX-LOOP r2 (Whistler NEEDS-CHANGES): a hostile non-object element (null / string /
+  // array) must be a total VALIDATION drop — validateOutboundDescriptor must NOT throw a
+  // TypeError dereferencing `.kind` on it. A throw would escape the pull loop into the
+  // outer catch, send NO text, and leave the file to spin on retry. These assert the
+  // never-throws contract: text still delivers, hostile descriptors drop-not-retry, and
+  // no fetch is ever attempted for a non-object descriptor.
+  it('text + a null attachment element DELIVERS the text, deletes, and never fetches (total guard)', async () => {
+    console.log = console.error = () => undefined;
+    const { bot, sends, fetched, inbox } = harden(okBytes);
+    const filePath = writeRawReply(inbox, 'text survives', [null]);
+    await runPoller(bot);
+
+    assert.ok(sends.some((s) => /text survives/.test(s.text)), 'text delivered despite null descriptor');
+    assert.ok(!sends.some((s) => (s.attachments?.length ?? 0) > 0), 'no attachment delivered');
+    assert.equal(fetched.length, 0, 'a non-object descriptor is never fetched');
+    assert.equal(fs.existsSync(filePath), false, 'text delivered → file consumed');
+  });
+
+  it('attachment-only reply with a null element is DROPPED (deleted), never fetched', async () => {
+    console.log = console.error = () => undefined;
+    const { bot, sends, fetched, inbox } = harden(okBytes);
+    const filePath = writeRawReply(inbox, '', [null]);
+    await runPoller(bot);
+
+    assert.equal(fetched.length, 0, 'never fetched a null descriptor');
+    assert.equal(sends.length, 0, 'nothing delivered');
+    assert.equal(fs.existsSync(filePath), false, 'all-invalid → DROP, not retry');
+  });
+
+  it('attachment-only reply with a non-object STRING element is DROPPED (deleted), never fetched', async () => {
+    console.log = console.error = () => undefined;
+    const { bot, sends, fetched, inbox } = harden(okBytes);
+    const filePath = writeRawReply(inbox, '', ['x']);
+    await runPoller(bot);
+
+    assert.equal(fetched.length, 0, 'never fetched a string descriptor');
+    assert.equal(sends.length, 0, 'nothing delivered');
+    assert.equal(fs.existsSync(filePath), false, 'all-invalid → DROP, not retry');
+  });
+
+  it('attachment-only reply with a nested-ARRAY element is DROPPED (deleted), never fetched', async () => {
+    console.log = console.error = () => undefined;
+    const { bot, sends, fetched, inbox } = harden(okBytes);
+    const filePath = writeRawReply(inbox, '', [[1, 2]]);
+    await runPoller(bot);
+
+    assert.equal(fetched.length, 0, 'never fetched an array descriptor');
+    assert.equal(sends.length, 0, 'nothing delivered');
+    assert.equal(fs.existsSync(filePath), false, 'all-invalid → DROP, not retry');
   });
 });
