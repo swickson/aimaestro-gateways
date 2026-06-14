@@ -46,6 +46,15 @@ export interface ThreadEntry {
   conversationId: string;
   /** The AMP message id returned by `/api/v1/route` — outbound's `in_reply_to`. */
   ampMessageId: string;
+  /**
+   * The TARGET user this conversation reaches — the inbound sender's AAD object id
+   * (the value inbound uses as the directory key: `aadObjectId ?? fromId`). Drives
+   * the Phase-5 by-user index so a PROACTIVE DM (no `in_reply_to`) can resolve a
+   * conversation to deliver into. REQUIRED on the write path; tolerated absent only
+   * on a pre-Phase-5 restored snapshot entry (graceful schema-version skew — such
+   * an entry is reply-deliverable but NOT indexed for DM until the user re-contacts).
+   */
+  aadObjectId?: string;
   context: ThreadContext;
   /**
    * Caller-supplied creation time (inbound's clock) — drives the
@@ -72,6 +81,14 @@ export interface ThreadStore {
   record(entry: ThreadEntry): void;
   findByAmpMessageId(botSlug: string, ampMessageId: string): ThreadEntry | null;
   findRecentByConversation(botSlug: string, conversationId: string): ThreadEntry | null;
+  /**
+   * Most-recent entry for a target user across ALL bots (Phase 5). The "last-seen
+   * bot" tiebreak for a proactive DM with no caller-supplied `botSlug`: whichever
+   * bot the user most recently messaged wins. Null if the user has no live mapping.
+   */
+  findLatestByUser(aadObjectId: string): ThreadEntry | null;
+  /** Most-recent entry for a specific (user, bot) pair (Phase 5 — caller botSlug override). */
+  findByUserAndBot(aadObjectId: string, botSlug: string): ThreadEntry | null;
   size(): number;
   snapshot(): ThreadStoreSnapshot;
   restore(snapshot: ThreadStoreSnapshot): void;
@@ -96,6 +113,9 @@ function ampKey(botSlug: string, ampMessageId: string): string {
 function convKey(botSlug: string, conversationId: string): string {
   return `${botSlug}${SEP}${conversationId}`;
 }
+function userBotKey(aadObjectId: string, botSlug: string): string {
+  return `${aadObjectId}${SEP}${botSlug}`;
+}
 
 export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore {
   const maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
@@ -106,6 +126,12 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
   const byAmpId = new Map<string, ThreadEntry>();
   // Recency index: (botSlug, conversationId) -> the latest entry for it.
   const recentByConv = new Map<string, ThreadEntry>();
+  // By-user recency (Phase 5): aadObjectId -> the user's latest entry across ALL
+  // bots (drives findLatestByUser = last-seen-bot tiebreak).
+  const byUser = new Map<string, ThreadEntry>();
+  // By-(user, bot) recency (Phase 5): aadObjectId\0botSlug -> latest for that pair
+  // (drives findByUserAndBot when the DM caller pins a botSlug).
+  const byUserAndBot = new Map<string, ThreadEntry>();
 
   /**
    * True once an entry has aged past the recency horizon. Measured from
@@ -116,12 +142,25 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
     return now() - (entry.recordedAt ?? entry.createdAt) > maxAgeMs;
   }
 
-  /** Drop an entry from both indexes (used by lazy expiry). */
+  /** Drop an entry from every index (used by lazy expiry). */
   function drop(entry: ThreadEntry): void {
     byAmpId.delete(ampKey(entry.botSlug, entry.ampMessageId));
     const ck = convKey(entry.botSlug, entry.conversationId);
     if (recentByConv.get(ck) === entry) {
       recentByConv.delete(ck);
+    }
+    // By-user pointers: clear only when they still point AT this entry. Safe to
+    // clear without promoting a runner-up — the by-user pointer always holds the
+    // user's NEWEST entry, and expiry is age-monotonic (the newest expires last),
+    // so a dropped pointer can never strand a newer live entry behind it.
+    if (entry.aadObjectId) {
+      if (byUser.get(entry.aadObjectId) === entry) {
+        byUser.delete(entry.aadObjectId);
+      }
+      const ubk = userBotKey(entry.aadObjectId, entry.botSlug);
+      if (byUserAndBot.get(ubk) === entry) {
+        byUserAndBot.delete(ubk);
+      }
     }
   }
 
@@ -131,11 +170,23 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
       if (oldestKey === undefined) break;
       const evicted = byAmpId.get(oldestKey);
       byAmpId.delete(oldestKey);
-      // Only clear the recency pointer if it still points at the evicted entry.
+      // Only clear the recency pointers if they still point at the evicted entry.
+      // Insertion-order eviction drops the OLDEST entry first, so a user's newest
+      // entry (the by-user pointer) is evicted last — clearing without promotion is
+      // safe (same invariant as lazy expiry in `drop`).
       if (evicted) {
         const ck = convKey(evicted.botSlug, evicted.conversationId);
         if (recentByConv.get(ck) === evicted) {
           recentByConv.delete(ck);
+        }
+        if (evicted.aadObjectId) {
+          if (byUser.get(evicted.aadObjectId) === evicted) {
+            byUser.delete(evicted.aadObjectId);
+          }
+          const ubk = userBotKey(evicted.aadObjectId, evicted.botSlug);
+          if (byUserAndBot.get(ubk) === evicted) {
+            byUserAndBot.delete(ubk);
+          }
         }
       }
     }
@@ -151,6 +202,21 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
     // Keep the newest entry as the conversation's recency pointer.
     if (!current || stored.createdAt >= current.createdAt) {
       recentByConv.set(ck, stored);
+    }
+    // By-user indexes (Phase 5): only an entry that carries the target user id is
+    // DM-routable. A pre-Phase-5 restored entry without one is intentionally skipped
+    // (reply-deliverable, just not DM-indexed) so the DM consumer never resolves to
+    // an entry it can't attribute to a user.
+    if (stored.aadObjectId) {
+      const ucur = byUser.get(stored.aadObjectId);
+      if (!ucur || stored.createdAt >= ucur.createdAt) {
+        byUser.set(stored.aadObjectId, stored);
+      }
+      const ubk = userBotKey(stored.aadObjectId, stored.botSlug);
+      const ubcur = byUserAndBot.get(ubk);
+      if (!ubcur || stored.createdAt >= ubcur.createdAt) {
+        byUserAndBot.set(ubk, stored);
+      }
     }
     evictIfNeeded();
   }
@@ -175,6 +241,26 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
     return entry;
   }
 
+  function findLatestByUser(aadObjectId: string): ThreadEntry | null {
+    const entry = byUser.get(aadObjectId);
+    if (!entry) return null;
+    if (isExpired(entry)) {
+      drop(entry);
+      return null;
+    }
+    return entry;
+  }
+
+  function findByUserAndBot(aadObjectId: string, botSlug: string): ThreadEntry | null {
+    const entry = byUserAndBot.get(userBotKey(aadObjectId, botSlug));
+    if (!entry) return null;
+    if (isExpired(entry)) {
+      drop(entry);
+      return null;
+    }
+    return entry;
+  }
+
   function snapshot(): ThreadStoreSnapshot {
     // Persist only live entries — never carry aged-out references across a restart.
     return { version: 1, entries: [...byAmpId.values()].filter((e) => !isExpired(e)) };
@@ -183,6 +269,8 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
   function restore(snap: ThreadStoreSnapshot): void {
     byAmpId.clear();
     recentByConv.clear();
+    byUser.clear();
+    byUserAndBot.clear();
     // Restore in insertion order so eviction ordering + recency stay consistent;
     // skip anything that aged out while the gateway was down.
     for (const entry of snap.entries) {
@@ -196,6 +284,8 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
     record,
     findByAmpMessageId,
     findRecentByConversation,
+    findLatestByUser,
+    findByUserAndBot,
     size: () => byAmpId.size,
     snapshot,
     restore,

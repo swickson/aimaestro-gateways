@@ -38,7 +38,7 @@ export interface UserResolver {
    * `(platform, aadObjectId)` alone — the object id is already tenant-unique — so
    * the tenant is not part of the resolve query or cache key.
    */
-  resolve(aadObjectId: string, handle?: string, tenantId?: string): Promise<ResolvedUser | null>;
+  resolve(aadObjectId: string, handle?: string, tenantId?: string, botSlug?: string): Promise<ResolvedUser | null>;
   clearCache(): void;
 }
 
@@ -51,6 +51,11 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
     Authorization: `Bearer ${options.apiKey}`,
   };
 
+  // Warn-once latch for the shape-(b) /last-seen route 404ing before Watson's
+  // Maestro route lands (SEQUENCING): a missing route must NEVER crash/block
+  // inbound, but it should surface ONCE so a permanent 404 in prod is visible.
+  let warnedLastSeen404 = false;
+
   function debug(message: string, ...args: unknown[]): void {
     if (options.debug) {
       console.log(`[DEBUG] [UserResolver] ${message}`, ...args);
@@ -61,12 +66,21 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
     return `${PLATFORM}:${aadObjectId}`;
   }
 
-  async function resolve(aadObjectId: string, handle?: string, tenantId?: string): Promise<ResolvedUser | null> {
+  async function resolve(
+    aadObjectId: string,
+    handle?: string,
+    tenantId?: string,
+    botSlug?: string,
+  ): Promise<ResolvedUser | null> {
     const key = cacheKey(aadObjectId);
 
     const cached = cache.get(key);
     if (cached) {
       debug(`Cache hit for ${key}`);
+      // Shape (b) fires on EVERY inbound — including a cache hit — so Maestro's
+      // stored `context.botSlug` tracks the most-recently-inbound bot for the DM
+      // tiebreak. Fire-and-forget; never blocks resolution.
+      updateLastSeen(cached.id, aadObjectId, botSlug);
       return cached;
     }
 
@@ -83,7 +97,7 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
         const user: ResolvedUser = body.user ?? body;
         cache.set(key, user);
         debug(`Resolved ${key} -> ${user.displayName} (${user.role})`);
-        updateLastSeen(user.id);
+        updateLastSeen(user.id, aadObjectId, botSlug);
         return user;
       }
 
@@ -102,7 +116,11 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
     //    resolve, so tenant-scoped directory-operator trust depends on this write
     //    happening on the FIRST create.
     try {
-      const teamsContext: TeamsPlatformContext | undefined = tenantId ? { tenantId } : undefined;
+      // Shape (a): bind tenantId (tenant-scoped trust) AND botSlug (DM tiebreak)
+      // into the mapping context at first create — Maestro stores it verbatim and
+      // never backfills, so both must be written on the FIRST contact.
+      const teamsContext: TeamsPlatformContext | undefined =
+        tenantId || botSlug ? { ...(tenantId && { tenantId }), ...(botSlug && { botSlug }) } : undefined;
       const createRes = await fetch(`${baseUrl}/api/users/auto-create`, {
         method: 'POST',
         headers,
@@ -131,18 +149,46 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
     }
   }
 
-  /** Fire-and-forget lastSeen update — non-critical, never blocks resolution. */
-  function updateLastSeen(userId: string): void {
-    fetch(`${baseUrl}/api/users/${userId}`, {
+  /**
+   * Shape (b) — fire-and-forget every-inbound last-seen report. REPLACES the old
+   * `PATCH /api/users/:id {lastSeenPerPlatform}`: emits Watson's exact
+   * `PATCH /api/users/<userId>/last-seen` with `{platform, platformUserId, context:{botSlug}}`
+   * so Maestro refreshes the most-recently-inbound bot for the DM tiebreak. Never
+   * blocks resolution; a 404 (route not yet deployed) is swallowed with a single
+   * warning. Skipped when no botSlug is available (nothing to report).
+   */
+  function updateLastSeen(userId: string, aadObjectId: string, botSlug?: string): void {
+    if (!botSlug) return;
+    fetch(`${baseUrl}/api/users/${userId}/last-seen`, {
       method: 'PATCH',
       headers,
-      body: JSON.stringify({ lastSeenPerPlatform: { [PLATFORM]: new Date().toISOString() } }),
+      body: JSON.stringify({
+        platform: PLATFORM,
+        platformUserId: aadObjectId,
+        context: { botSlug },
+      }),
       signal: AbortSignal.timeout(5000),
-    }).catch((err) => {
-      if (options.debug) {
-        console.log(`[DEBUG] [UserResolver] lastSeen update failed: ${(err as Error).message}`);
-      }
-    });
+    })
+      .then((res) => {
+        if (res.ok) return;
+        if (res.status === 404) {
+          if (!warnedLastSeen404) {
+            warnedLastSeen404 = true;
+            console.warn(
+              `[UserResolver] /api/users/:id/last-seen returned 404 — Maestro route not yet deployed; suppressing further warnings (inbound unaffected).`,
+            );
+          }
+          return;
+        }
+        if (options.debug) {
+          console.log(`[DEBUG] [UserResolver] last-seen update non-ok (${res.status}) for ${PLATFORM}:${aadObjectId}`);
+        }
+      })
+      .catch((err) => {
+        if (options.debug) {
+          console.log(`[DEBUG] [UserResolver] last-seen update failed: ${(err as Error).message}`);
+        }
+      });
   }
 
   function clearCache(): void {
