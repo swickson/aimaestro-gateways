@@ -35,6 +35,16 @@ import type { UserResolver } from './user-resolver.js';
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 min — personal-scope "new conversation" window.
 const MAX_TOPIC_HINTS = 3;
 
+// Maestro `/api/v1/route` 400s on an empty `payload.message` ("must have type and
+// message fields"). An attachment-only Teams message (a photo with no caption) has
+// empty text whether its attachments upload cleanly (Mode 2 success) or all fail —
+// either way an empty message means TOTAL loss. We substitute one of these CONSTANT
+// gateway placeholders so the agent still sees that something arrived. They are
+// injected AFTER the content scanner, so they MUST be constant: no filename, sender,
+// or other untrusted text interpolation (that would be an injection vector).
+const ATTACHMENT_ONLY_PLACEHOLDER = '[Teams: attachment received — see attachments]';
+const ATTACHMENT_FAILED_PLACEHOLDER = '[Teams: an attachment was received but could not be retrieved]';
+
 // ---------------------------------------------------------------------------
 // Topic hints (ported from discord-gateway/src/inbound.ts; transitional dup —
 // candidate for packages/common later).
@@ -244,13 +254,23 @@ export async function handleInbound(
     }
   }
 
+  // 7.6 Empty-message guard: never POST an empty `payload.message` (Maestro 400 =
+  //     total loss). Fires for an attachment-bearing message whose scanned text is
+  //     empty — whether the attachments routed (no-caption photo) or all failed.
+  //     Placeholder is a CONSTANT (count-/name-free) injected after the scanner.
+  let message = sanitized;
+  if (message.trim() === '' && activity.attachments?.length) {
+    message = attachments?.length ? ATTACHMENT_ONLY_PLACEHOLDER : ATTACHMENT_FAILED_PLACEHOLDER;
+    log(`empty text with ${activity.attachments.length} attachment(s) — substituting placeholder (${attachments?.length ?? 0} routed).`);
+  }
+
   // 8. Target = this bot's default agent (the bot IS the agent selector; @AIM
   //    cross-targeting is deferred for v1).
   const routeRequest: AMPRouteRequest = {
     to: bot.defaultAgent,
     subject: `Teams message from ${displayName}`,
     priority: 'normal',
-    payload: { type: 'request', message: sanitized, context, ...(attachments && { attachments }) },
+    payload: { type: 'request', message, context, ...(attachments && { attachments }) },
   };
 
   // 9. Route async. A post-200 failure is invisible to Teams -> log loudly.
