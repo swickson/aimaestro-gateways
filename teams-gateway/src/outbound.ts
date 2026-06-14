@@ -51,6 +51,8 @@ export interface OutboundBot {
   slug: string;
   /** Absolute path to this bot's AMP inbox dir (sender-nested `*.json` files). */
   inboxDir: string;
+  /** Configured Maestro base URL; outbound attachment URLs must resolve to this origin. */
+  maestroUrl: string;
   /**
    * The bot adapter's configured `serviceUrl`. Used ONLY to log a Fork-O1
    * observability warning when it diverges from the stored reference's serviceUrl
@@ -81,15 +83,20 @@ export interface OutboundDeps {
  * text-only). Never throws.
  */
 async function pullOutboundAttachments(
-  slug: string,
+  bot: OutboundBot,
   declared: AMPAttachmentV1[],
   fileName: string,
 ): Promise<OutboundAttachment[]> {
   const out: OutboundAttachment[] = [];
+  const maestroOrigin = new URL(bot.maestroUrl).origin;
   for (const att of declared) {
     try {
       if (!att.url) throw new Error('descriptor has no signed url');
-      const res = await fetch(att.url, { signal: AbortSignal.timeout(ATTACHMENT_PULL_TIMEOUT_MS) });
+      const url = new URL(att.url);
+      if (url.origin !== maestroOrigin) {
+        throw new Error(`download url origin is not Maestro (${url.origin})`);
+      }
+      const res = await fetch(url, { signal: AbortSignal.timeout(ATTACHMENT_PULL_TIMEOUT_MS) });
       if (!res.ok) throw new Error(`download ${res.status}`);
       out.push({
         filename: att.filename,
@@ -97,7 +104,7 @@ async function pullOutboundAttachments(
         bytes: new Uint8Array(await res.arrayBuffer()),
       });
     } catch (e) {
-      console.error(`[OUTBOUND] (${slug}) failed to pull attachment '${att.filename}' (${att.id}) for ${fileName}: ${(e as Error).message}`);
+      console.error(`[OUTBOUND] (${bot.slug}) failed to pull attachment '${att.filename}' (${att.id}) for ${fileName}: ${(e as Error).message}`);
     }
   }
   return out;
@@ -180,7 +187,7 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
 
       // w3 attachments: pull bytes for any cited descriptors (signed url = auth).
       const declared = Array.isArray(msg.payload?.attachments) ? msg.payload.attachments : [];
-      const attachments = declared.length > 0 ? await pullOutboundAttachments(bot.slug, declared, path.basename(filePath)) : [];
+      const attachments = declared.length > 0 ? await pullOutboundAttachments(bot, declared, path.basename(filePath)) : [];
 
       // The outbound.ts:139 fix: "nothing to post" is now text AND attachments empty.
       // An attachment-only reply (empty text + attachments) must DELIVER, not delete.

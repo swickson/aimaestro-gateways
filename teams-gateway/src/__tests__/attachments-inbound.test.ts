@@ -184,6 +184,18 @@ describe('w3 inbound attachment ingestion', () => {
     assert.equal(res.failed, 1);
   });
 
+  it('FAIL-OPEN: status with a non-routable scan_status is not cited even if url is present', async () => {
+    installFetch([
+      { match: '/attachments/upload', respond: () => json({ attachment_id: 'x', upload_url: 'https://maestro.test/signed/put/x' }) },
+      { match: '/signed/put/', respond: () => new Response(null, { status: 200 }) },
+      { match: '/confirm', respond: () => json({ ok: true }) },
+      { match: '/status', respond: () => json(statusBody('x', { scan_status: 'rejected' })) },
+    ]);
+    const res = await ingestAttachments([file()], deps());
+    assert.equal(res.attachments.length, 0);
+    assert.equal(res.failed, 1);
+  });
+
   it('one failed attachment does not block a healthy sibling (partial success)', async () => {
     // First file downloads fine; second throws on download. Healthy one still ingests.
     let n = 0;

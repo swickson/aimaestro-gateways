@@ -314,6 +314,7 @@ function buildOutboundBots(
     bots.push({
       slug: bot.slug,
       inboxDir: registration.inboxDir,
+      maestroUrl: config.amp.maestroUrl,
       configuredServiceUrl: app.api.serviceUrl,
       send: async (conversationId, text, markdown, attachments) => {
         await app.send(conversationId, {
