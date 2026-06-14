@@ -26,8 +26,9 @@
 
 import { Cache } from '@aimaestro/common/cache.js';
 import type { ConversationReference } from '@microsoft/teams.api';
-import type { AMPRouteRequest, AMPRouteResponse, EnrichedContext, OperatorAadRef } from './types.js';
+import type { AMPAttachmentV1, AMPRouteRequest, AMPRouteResponse, AttachmentPolicy, EnrichedContext, OperatorAadRef } from './types.js';
 import { resolveTrust, sanitizeTeamsMessage } from './content-security.js';
+import { ingestAttachments, type DownloadAttachment, type RawInboundAttachment } from './attachments-inbound.js';
 import type { ThreadStore } from './thread-store.js';
 import type { UserResolver } from './user-resolver.js';
 
@@ -100,6 +101,18 @@ export interface InboundActivity {
   serviceUrl?: string;
   /** Full conversation reference (`ctx.ref`) — drives outbound `continueConversation`. */
   reference: ConversationReference;
+  /**
+   * SDK-decoupled attachment descriptors extracted from the activity (w3). The
+   * `downloadAttachment` closure (below) resolves their bytes. Absent/empty for a
+   * text-only message.
+   */
+  attachments?: RawInboundAttachment[];
+  /**
+   * Byte downloader for `attachments`, bound by `server.ts` to the bot connector /
+   * pre-auth Teams URL. Kept as a closure (not an SDK type) so this module stays
+   * SDK-free — the one function that crosses, precedented by `reference: ctx.ref`.
+   */
+  downloadAttachment?: DownloadAttachment;
 }
 
 /** One bot's identity + the per-bot AMP credentials it routes as. */
@@ -121,6 +134,8 @@ export interface InboundDeps {
   threadStore: ThreadStore;
   /** Shared activity.id seen-set (dedupe). */
   dedupe: Cache<true>;
+  /** Gateway-side attachment caps + deny policy (w3). */
+  attachmentPolicy: AttachmentPolicy;
   timeoutMs: number;
   debug: boolean;
   /** Injectable clock for deterministic tests. Defaults to `Date.now`. */
@@ -202,13 +217,40 @@ export async function handleInbound(
     topicHints: extractTopicHints(activity.text),
   };
 
+  // 7.5 Ingest attachments (w3) BEFORE routing — the AMPAttachmentV1[] is cited in
+  //     the payload, no bytes on /route. Runs off the ack-fast path (handleInbound
+  //     is fire-and-forget). FAIL-OPEN: a failed attachment drops itself, never the
+  //     message — an attachment-only message still routes its (empty) text.
+  let attachments: AMPAttachmentV1[] | undefined;
+  if (activity.attachments?.length) {
+    if (!activity.downloadAttachment || !bot.ampApiKey) {
+      console.error(
+        `[AMP] (${bot.slug}) ${activity.attachments.length} attachment(s) on activity ${activity.activityId} but ` +
+          `${!bot.ampApiKey ? 'no AMP api key' : 'no downloader'} — routing text only.`,
+      );
+    } else {
+      const ingest = await ingestAttachments(activity.attachments, {
+        maestroUrl: deps.maestroUrl,
+        ampApiKey: bot.ampApiKey,
+        botSlug: bot.slug,
+        policy: deps.attachmentPolicy,
+        downloadAttachment: activity.downloadAttachment,
+        timeoutMs: deps.timeoutMs,
+      });
+      if (ingest.attachments.length > 0) attachments = ingest.attachments;
+      if (ingest.failed > 0 || ingest.skipped > 0) {
+        log(`attachments: ${ingest.attachments.length} routed, ${ingest.failed} failed, ${ingest.skipped} skipped.`);
+      }
+    }
+  }
+
   // 8. Target = this bot's default agent (the bot IS the agent selector; @AIM
   //    cross-targeting is deferred for v1).
   const routeRequest: AMPRouteRequest = {
     to: bot.defaultAgent,
     subject: `Teams message from ${displayName}`,
     priority: 'normal',
-    payload: { type: 'request', message: sanitized, context },
+    payload: { type: 'request', message: sanitized, context, ...(attachments && { attachments }) },
   };
 
   // 9. Route async. A post-200 failure is invisible to Teams -> log loudly.

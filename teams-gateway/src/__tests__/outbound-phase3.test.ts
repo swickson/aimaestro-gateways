@@ -8,7 +8,10 @@ import { chunkText, formatReply, TEAMS_MAX_LENGTH } from '../format.js';
 import { startOutboundPoller, type OutboundBot } from '../outbound.js';
 import { restoreThreadStore, saveThreadStore } from '../thread-persistence.js';
 import { createThreadStore, type ThreadEntry } from '../thread-store.js';
-import type { AMPMessage, ThreadContext } from '../types.js';
+import type { AMPMessage, AttachmentPolicy, ThreadContext } from '../types.js';
+
+/** Permissive policy — Phase-3 tests predate attachments; cap/validate is covered in attachments-outbound.test.ts. */
+const TEST_POLICY: AttachmentPolicy = { maxBytes: 26_214_400, maxCount: 10, denyContentTypes: [] };
 
 const tempRoots: string[] = [];
 
@@ -106,6 +109,7 @@ describe('Teams outbound reply poller', () => {
       {
         slug: 'maestro',
         inboxDir: maestroInbox,
+        maestroUrl: 'https://maestro.test',
         send: async (conversationId, text, markdown) => {
           sends.push({ slug: 'maestro', conversationId, text, markdown });
         },
@@ -113,13 +117,14 @@ describe('Teams outbound reply poller', () => {
       {
         slug: 'echo',
         inboxDir: echoInbox,
+        maestroUrl: 'https://maestro.test',
         send: async (conversationId, text, markdown) => {
           sends.push({ slug: 'echo', conversationId, text, markdown });
         },
       },
     ];
 
-    const stop = startOutboundPoller({ bots, threadStore: store, pollIntervalMs: 60_000, markdownDefault: true, debug: false });
+    const stop = startOutboundPoller({ bots, threadStore: store, pollIntervalMs: 60_000, markdownDefault: true, policy: TEST_POLICY, debug: false });
     try {
       await waitFor(() => sends.length === 1 && !fs.existsSync(filePath), 'maestro send and delete');
       await settlePollTick();
@@ -152,6 +157,7 @@ describe('Teams outbound reply poller', () => {
       bots: [{
         slug: 'maestro',
         inboxDir: inbox,
+        maestroUrl: 'https://maestro.test',
         send: async () => {
           sendCalls += 1;
           throw new Error('transport down');
@@ -160,6 +166,7 @@ describe('Teams outbound reply poller', () => {
       threadStore: store,
       pollIntervalMs: 60_000,
       markdownDefault: true,
+      policy: TEST_POLICY,
       debug: false,
     });
     try {
@@ -189,6 +196,7 @@ describe('Teams outbound reply poller', () => {
       bots: [{
         slug: 'maestro',
         inboxDir: inbox,
+        maestroUrl: 'https://maestro.test',
         send: async () => {
           throw new Error('should not send without a thread mapping');
         },
@@ -196,6 +204,7 @@ describe('Teams outbound reply poller', () => {
       threadStore: store,
       pollIntervalMs: 10,
       markdownDefault: true,
+      policy: TEST_POLICY,
       debug: false,
     });
     try {
@@ -230,6 +239,7 @@ describe('Teams outbound reply poller', () => {
       bots: [{
         slug: 'maestro',
         inboxDir: inbox,
+        maestroUrl: 'https://maestro.test',
         send: async (_conversationId, text) => {
           chunks.push(text);
         },
@@ -237,6 +247,7 @@ describe('Teams outbound reply poller', () => {
       threadStore: store,
       pollIntervalMs: 60_000,
       markdownDefault: false,
+      policy: TEST_POLICY,
       debug: false,
     });
     try {
@@ -267,6 +278,7 @@ describe('Teams outbound reply poller', () => {
       bots: [{
         slug: 'maestro',
         inboxDir: inbox,
+        maestroUrl: 'https://maestro.test',
         send: async () => {
           sendCalls += 1;
           await sendStarted;
@@ -275,6 +287,7 @@ describe('Teams outbound reply poller', () => {
       threadStore: store,
       pollIntervalMs: 1,
       markdownDefault: true,
+      policy: TEST_POLICY,
       debug: false,
     });
 
