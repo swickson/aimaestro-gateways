@@ -20,6 +20,7 @@ export type {
   AMPEnvelope,
   AMPPayload,
   AMPMessage,
+  AMPAttachmentV1,
   AMPRouteRequest,
   AMPRouteResponse,
   ResolvedUser,
@@ -27,6 +28,25 @@ export type {
   EnrichedSender,
   EnrichedThread,
 } from '@aimaestro/common/types.js';
+
+/**
+ * Gateway-side attachment policy (w3). Caps + content-type policy are enforced
+ * BEFORE the Maestro upload flow (fail-fast), in addition to Maestro's own 25MB
+ * cap + magic-byte sniff at confirm. VALUES are a Whistler-owned security decision;
+ * the mechanism is env-driven (config.ts) so he can tighten with zero code change.
+ */
+export interface AttachmentPolicy {
+  /** Hard per-attachment byte ceiling (default 25MB, matching AMP_MAX_ATTACHMENT_BYTES). */
+  maxBytes: number;
+  /** Per-message attachment count cap; extras are dropped + logged. */
+  maxCount: number;
+  /**
+   * Lower-cased content-type substrings that are ALWAYS rejected gateway-side
+   * (known-dangerous executables), regardless of allow policy. Maestro still
+   * sniffs magic bytes at confirm; this is defense-in-depth, fail-fast.
+   */
+  denyContentTypes: string[];
+}
 
 /**
  * One Teams bot identity: an Azure AD app registration paired with the AMP
@@ -122,6 +142,8 @@ export interface GatewayConfig {
   markdownDefault: boolean;
   /** User-directory resolver cache TTL (CACHE_USER_TTL_MS; default 5 min). */
   cacheUserTtlMs: number;
+  /** Gateway-side attachment caps + deny policy (w3). */
+  attachments: AttachmentPolicy;
   /** Where the thread-store JSON snapshot is persisted across restarts (Phase 3). */
   threadStorePath: string;
   /** Periodic thread-store snapshot cadence — crash-safety floor between graceful saves. */

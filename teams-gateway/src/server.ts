@@ -33,6 +33,7 @@ import { Cache } from '@aimaestro/common/cache.js';
 import { loadConfig } from './config.js';
 import { toBotConfigs } from './bot-registry.js';
 import { handleInbound, type InboundActivity, type InboundDeps } from './inbound.js';
+import type { DownloadAttachment, RawInboundAttachment } from './attachments-inbound.js';
 import { rejectMismatchedRecipient } from './recipient-binding.js';
 import { createThreadStore, type ThreadStore } from './thread-store.js';
 import { createDmRouter } from './dm.js';
@@ -78,6 +79,106 @@ function extractStrippedText(activity: {
     }
   }
   return activity.text ?? '';
+}
+
+/** Teams file-send wrapper content type — carries the real download URL + name. */
+const TEAMS_FILE_DOWNLOAD_INFO = 'application/vnd.microsoft.teams.file.download.info';
+/** Per-attachment HTTP leg timeout (download + Maestro upload/confirm/status). */
+const ATTACHMENT_TIMEOUT_MS = 20_000;
+
+/**
+ * Minimal extension -> MIME map. The gateway-declared content type is ADVISORY
+ * (Maestro magic-byte sniffs authoritatively at confirm); this exists only so the
+ * gateway deny-list can catch known-dangerous executables by name. Not exhaustive.
+ */
+const EXT_MIME: Record<string, string> = {
+  exe: 'application/x-msdownload', dll: 'application/x-msdownload', com: 'application/x-msdownload',
+  bat: 'application/x-msdos-program', cmd: 'application/x-msdos-program', msi: 'application/x-msdownload',
+  sh: 'application/x-sh', bin: 'application/x-executable',
+  pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  zip: 'application/zip',
+};
+
+function mimeFromName(name: string | undefined): string {
+  const ext = name?.split('.').pop()?.toLowerCase() ?? '';
+  return EXT_MIME[ext] ?? 'application/octet-stream';
+}
+
+/** Structural (SDK-churn-decoupled) view of a Teams activity attachment. */
+interface SdkAttachment {
+  contentType?: string;
+  contentUrl?: string;
+  name?: string;
+  content?: unknown;
+}
+
+/**
+ * Extract the SDK-decoupled inbound attachments from a Teams activity. Teams file
+ * sends arrive as a `file.download.info` wrapper carrying `content.downloadUrl`
+ * (a pre-authenticated URL) + the real file name; inline content (images, etc.)
+ * carries a `contentUrl` (http or `data:` URI). Anything without a fetchable URL
+ * is skipped here (nothing to download).
+ */
+function extractInboundAttachments(activity: { attachments?: SdkAttachment[] }): RawInboundAttachment[] {
+  const list = activity.attachments;
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const out: RawInboundAttachment[] = [];
+  for (const att of list) {
+    const contentType = att.contentType ?? '';
+    if (contentType === TEAMS_FILE_DOWNLOAD_INFO) {
+      const content = (att.content ?? {}) as { downloadUrl?: string };
+      if (content.downloadUrl) {
+        out.push({ name: att.name ?? 'file', contentType: mimeFromName(att.name), downloadUrl: content.downloadUrl });
+      }
+      continue;
+    }
+    if (att.contentUrl) {
+      out.push({ name: att.name ?? 'attachment', contentType, contentUrl: att.contentUrl });
+    }
+  }
+  return out;
+}
+
+/**
+ * Decode a `data:` URI into bytes (inline attachment fast-path — no network).
+ * Returns null if `value` is not a base64 data URI.
+ */
+function decodeDataUri(value: string): Uint8Array | null {
+  const match = /^data:[^;,]*;base64,(.*)$/s.exec(value);
+  if (!match) return null;
+  return new Uint8Array(Buffer.from(match[1], 'base64'));
+}
+
+/**
+ * Build the per-activity byte downloader bound to this inbound `ctx`. SDK-coupling
+ * lives HERE (server.ts) so inbound.ts / attachments-inbound.ts stay SDK-free.
+ *   - Teams `file.download.info` `downloadUrl` is pre-authenticated — GET directly.
+ *   - inline `data:` URIs decode locally.
+ *   - other `contentUrl` (e.g. connector `/v3/attachments`) is fetched best-effort;
+ *     the connector-token path is a LIVE-AZURE WATCH ITEM (same class as the
+ *     Fork-O1 App.send unknown) — a 401/403 here fails OPEN (the attachment drops,
+ *     the text still routes) and is logged loudly.
+ */
+function buildAttachmentDownloader(slug: string): DownloadAttachment {
+  return async (attachment: RawInboundAttachment): Promise<Uint8Array> => {
+    const url = attachment.downloadUrl ?? attachment.contentUrl;
+    if (!url) throw new Error('attachment has no downloadUrl/contentUrl');
+
+    const inline = decodeDataUri(url);
+    if (inline) return inline;
+
+    const res = await fetch(url, { signal: AbortSignal.timeout(ATTACHMENT_TIMEOUT_MS) });
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        console.error(`[TEAMS] (${slug}) attachment download ${res.status} (connector-token path — live-Azure watch item) for '${attachment.name}'.`);
+      }
+      throw new Error(`download failed (${res.status})`);
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  };
 }
 
 /** Per-bot runtime state surfaced on `/health`. */
@@ -141,9 +242,11 @@ async function buildBotApps(
       userResolver: services.userResolver,
       threadStore: services.threadStore,
       dedupe: services.dedupe,
+      attachmentPolicy: config.attachments,
       timeoutMs: ROUTE_TIMEOUT_MS,
       debug: config.debug,
     };
+    const downloadAttachment = buildAttachmentDownloader(bot.slug);
 
     app.on('message', async (ctx) => {
       // ACK-FAST: build the SDK-decoupled DTO synchronously, fire the pipeline
@@ -175,6 +278,8 @@ async function buildBotApps(
         tenantId: a.channelData?.tenant?.id,
         serviceUrl: a.serviceUrl,
         reference: ctx.ref,
+        attachments: extractInboundAttachments(a),
+        downloadAttachment,
       };
       void handleInbound(activity, deps).catch((err) => {
         console.error(`[TEAMS] (${bot.slug}) unhandled inbound error for activity ${activity.activityId}:`, err);
@@ -210,12 +315,25 @@ function buildOutboundBots(
       slug: bot.slug,
       inboxDir: registration.inboxDir,
       configuredServiceUrl: app.api.serviceUrl,
-      send: async (conversationId, text, markdown) => {
+      send: async (conversationId, text, markdown, attachments) => {
         await app.send(conversationId, {
           type: 'message',
           text,
           // markdown is the Teams default; only set the field to fall back to plain.
           ...(markdown ? {} : { textFormat: 'plain' }),
+          // w3: inline each attachment as a base64 data URI. Small images render
+          // inline; larger files surface as a download. The exact Teams attachment
+          // shape (hosted vs file-consent vs Graph) is a LIVE-AZURE WATCH ITEM —
+          // verified at deploy, same class as the Fork-O1 App.send unknown.
+          ...(attachments?.length
+            ? {
+                attachments: attachments.map((a) => ({
+                  contentType: a.contentType || 'application/octet-stream',
+                  contentUrl: `data:${a.contentType || 'application/octet-stream'};base64,${Buffer.from(a.bytes).toString('base64')}`,
+                  name: a.filename,
+                })),
+              }
+            : {}),
         });
       },
     });
