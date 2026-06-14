@@ -106,41 +106,57 @@ class AttachmentOverCapError extends Error {}
 
 /**
  * Validate ONE agent-supplied descriptor against the gateway policy. Returns a
- * human-readable reason string when invalid, or `null` when it passes. Every field
- * is checked at RUNTIME (the JSON is agent-controlled — the static `AMPAttachmentV1`
- * type is not a guarantee). The url must be same-origin as the configured Maestro
- * AND its path EXACTLY `/api/v1/attachments/<id>/download` with `<id>` === the
+ * human-readable reason string when invalid, or `null` when it passes. The input
+ * is typed `unknown`: `payload.attachments` is agent-controlled JSON, so an element
+ * can be `null`, a string, an array, or any non-object — the static `AMPAttachmentV1`
+ * type is NOT a runtime guarantee. This function is TOTAL: it FIRST proves `att` is a
+ * non-null, non-array object before reading any field, so it never throws a TypeError
+ * on a hostile shape — it always returns a drop reason instead. Every field needed for
+ * delivery is then runtime-checked. The url must be same-origin as the configured
+ * Maestro AND its path EXACTLY `/api/v1/attachments/<id>/download` with `<id>` === the
  * descriptor's own id — closing the "same-origin but arbitrary internal path" (e.g.
  * `/api/v1/agents`) SSRF angle on top of Whistler's origin pin.
  */
 function validateOutboundDescriptor(
-  att: AMPAttachmentV1,
+  att: unknown,
   maestroOrigin: string,
   policy: AttachmentPolicy,
 ): string | null {
-  if (att.kind !== 'amp-v1') return `kind '${String(att.kind)}' is not amp-v1`;
-  if (att.scan_status !== 'clean' && att.scan_status !== 'basic_clean') {
-    return `scan_status '${String(att.scan_status)}' is not routable`;
+  // FIRST guard — prove `att` is a non-null, non-array object before any field
+  // dereference. Without this, `att.kind` on a `null`/string/array element throws a
+  // TypeError that escapes the pull loop, breaks the never-throws contract, and leaves
+  // a hostile descriptor spinning on retry instead of policy-dropping.
+  if (att === null || typeof att !== 'object' || Array.isArray(att)) {
+    const got = att === null ? 'null' : Array.isArray(att) ? 'array' : typeof att;
+    return `descriptor is not an object (got ${got})`;
   }
-  if (typeof att.id !== 'string' || att.id.trim() === '') return 'missing/empty id';
-  if (typeof att.filename !== 'string' || att.filename.trim() === '') return 'missing/empty filename';
-  if (typeof att.size !== 'number' || !Number.isFinite(att.size) || att.size <= 0) {
-    return `invalid size ${String(att.size)}`;
+  const d = att as Record<string, unknown>;
+  if (d.kind !== 'amp-v1') return `kind '${String(d.kind)}' is not amp-v1`;
+  if (d.scan_status !== 'clean' && d.scan_status !== 'basic_clean') {
+    return `scan_status '${String(d.scan_status)}' is not routable`;
   }
-  if (att.size > policy.maxBytes) return `declared size ${att.size}B exceeds cap ${policy.maxBytes}B`;
-  const ct = (typeof att.content_type === 'string' ? att.content_type : '').toLowerCase();
+  if (typeof d.id !== 'string' || d.id.trim() === '') return 'missing/empty id';
+  if (typeof d.filename !== 'string' || d.filename.trim() === '') return 'missing/empty filename';
+  if (typeof d.content_type !== 'string' || d.content_type.trim() === '') {
+    return 'missing/empty content_type';
+  }
+  if (typeof d.size !== 'number' || !Number.isFinite(d.size) || d.size <= 0) {
+    return `invalid size ${String(d.size)}`;
+  }
+  if (d.size > policy.maxBytes) return `declared size ${d.size}B exceeds cap ${policy.maxBytes}B`;
+  const ct = d.content_type.toLowerCase();
   if (policy.denyContentTypes.some((deny) => ct.includes(deny))) {
-    return `content-type '${att.content_type}' is deny-listed`;
+    return `content-type '${d.content_type}' is deny-listed`;
   }
-  if (typeof att.url !== 'string' || att.url.trim() === '') return 'missing/empty url';
+  if (typeof d.url !== 'string' || d.url.trim() === '') return 'missing/empty url';
   let url: URL;
   try {
-    url = new URL(att.url);
+    url = new URL(d.url);
   } catch {
     return 'unparseable url';
   }
   if (url.origin !== maestroOrigin) return `url origin '${url.origin}' is not Maestro`;
-  const expectedPath = `/api/v1/attachments/${att.id}/download`;
+  const expectedPath = `/api/v1/attachments/${d.id}/download`;
   if (url.pathname !== expectedPath) return `url path '${url.pathname}' != '${expectedPath}'`;
   return null;
 }
@@ -200,7 +216,7 @@ async function readBoundedBody(res: Response, maxBytes: number): Promise<Uint8Ar
  */
 async function pullOutboundAttachments(
   bot: OutboundBot,
-  declared: AMPAttachmentV1[],
+  declared: unknown[],
   fileName: string,
   policy: AttachmentPolicy,
 ): Promise<PullResult> {
@@ -220,27 +236,32 @@ async function pullOutboundAttachments(
     const invalid = validateOutboundDescriptor(att, maestroOrigin, policy);
     if (invalid) {
       // Malformed/hostile descriptor — DROP it (won't self-heal). Loud, never silent.
+      // `att` may be a non-object here, so extract any filename defensively (no throw).
+      const label = String((att as { filename?: unknown } | null | undefined)?.filename);
       result.validationDrops += 1;
-      console.error(`[OUTBOUND] (${bot.slug}) ${fileName}: rejecting attachment descriptor '${String(att?.filename)}' (${invalid}) — dropping.`);
+      console.error(`[OUTBOUND] (${bot.slug}) ${fileName}: rejecting attachment descriptor '${label}' (${invalid}) — dropping.`);
       continue;
     }
+    // Validation proved the runtime shape: a non-null object with non-empty string
+    // id/filename/content_type/url and a finite positive size. Safe to narrow from unknown.
+    const valid = att as AMPAttachmentV1;
     try {
-      const res = await fetch(att.url, {
+      const res = await fetch(valid.url, {
         signal: AbortSignal.timeout(ATTACHMENT_PULL_TIMEOUT_MS),
         redirect: 'error', // a 3xx off the pinned origin must NOT be followed (Watson F2)
       });
       if (!res.ok) throw new Error(`download ${res.status}`);
       const bytes = await readBoundedBody(res, policy.maxBytes);
-      result.pulled.push({ filename: att.filename, contentType: att.content_type, bytes });
+      result.pulled.push({ filename: valid.filename, contentType: valid.content_type, bytes });
     } catch (e) {
       if (e instanceof AttachmentOverCapError) {
         // Body violated the size cap — a lying/hostile descriptor, DROP (retry won't help).
         result.validationDrops += 1;
-        console.error(`[OUTBOUND] (${bot.slug}) ${fileName}: attachment '${att.filename}' (${att.id}) over size cap — dropping: ${e.message}`);
+        console.error(`[OUTBOUND] (${bot.slug}) ${fileName}: attachment '${valid.filename}' (${valid.id}) over size cap — dropping: ${e.message}`);
       } else {
         // Valid descriptor, transient/network pull failure — leave for retry.
         result.pullFailures += 1;
-        console.error(`[OUTBOUND] (${bot.slug}) failed to pull attachment '${att.filename}' (${att.id}) for ${fileName}: ${(e as Error).message}`);
+        console.error(`[OUTBOUND] (${bot.slug}) failed to pull attachment '${valid.filename}' (${valid.id}) for ${fileName}: ${(e as Error).message}`);
       }
     }
   }
