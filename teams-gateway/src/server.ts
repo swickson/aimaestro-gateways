@@ -500,6 +500,7 @@ async function main(): Promise<void> {
       threadStore,
       pollIntervalMs: config.polling.intervalMs,
       markdownDefault: config.markdownDefault,
+      policy: config.attachments,
       debug: config.debug,
     });
     // Periodic crash-safety snapshot; the graceful shutdown path saves once more.

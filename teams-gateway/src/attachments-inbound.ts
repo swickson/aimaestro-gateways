@@ -83,7 +83,8 @@ interface StatusResponse {
   scan_status: AMPAttachmentV1['scan_status'];
   uploaded_at: string;
   expires_at: string;
-  url: string;
+  /** Signed download url; `null` until scan_status is routable (clean/basic_clean). */
+  url: string | null;
 }
 
 /** Resolve a possibly-relative upload URL against the Maestro base. */
