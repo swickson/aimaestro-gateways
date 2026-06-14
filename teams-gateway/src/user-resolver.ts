@@ -66,7 +66,14 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
     return `${PLATFORM}:${aadObjectId}`;
   }
 
-  async function resolve(
+  /**
+   * Resolve (or auto-create) a sender, firing shape (b) exactly once for every
+   * successful resolution. Shape (b) is fired in `resolve()` — the single
+   * unconditional fire-point below — NOT in this lookup, so that EVERY success
+   * path (cache-hit, resolve-success, auto-create) reports last-seen and no new
+   * path can silently skip it (Whistler review: first-contact previously drifted).
+   */
+  async function lookup(
     aadObjectId: string,
     handle?: string,
     tenantId?: string,
@@ -77,10 +84,6 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
     const cached = cache.get(key);
     if (cached) {
       debug(`Cache hit for ${key}`);
-      // Shape (b) fires on EVERY inbound — including a cache hit — so Maestro's
-      // stored `context.botSlug` tracks the most-recently-inbound bot for the DM
-      // tiebreak. Fire-and-forget; never blocks resolution.
-      updateLastSeen(cached.id, aadObjectId, botSlug);
       return cached;
     }
 
@@ -97,7 +100,6 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
         const user: ResolvedUser = body.user ?? body;
         cache.set(key, user);
         debug(`Resolved ${key} -> ${user.displayName} (${user.role})`);
-        updateLastSeen(user.id, aadObjectId, botSlug);
         return user;
       }
 
@@ -147,6 +149,25 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
       console.error(`[UserResolver] Auto-create request failed for ${key}:`, (error as Error).message);
       return null;
     }
+  }
+
+  async function resolve(
+    aadObjectId: string,
+    handle?: string,
+    tenantId?: string,
+    botSlug?: string,
+  ): Promise<ResolvedUser | null> {
+    const user = await lookup(aadObjectId, handle, tenantId, botSlug);
+    if (user) {
+      // Shape (b) — the SINGLE unconditional every-inbound fire-point. Covers
+      // ALL success paths (cache-hit, resolve-success, auto-create/first-contact)
+      // with exactly one (b) per inbound, so Maestro's stored `context.botSlug`
+      // always tracks the most-recently-inbound bot for the DM tiebreak. Routing
+      // every success through here is what prevents a path from silently skipping
+      // (b) again. Fire-and-forget + 404-graceful; never blocks resolution.
+      updateLastSeen(user.id, aadObjectId, botSlug);
+    }
+    return user;
   }
 
   /**
