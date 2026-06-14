@@ -49,7 +49,7 @@ function installFetch(statuses: number[] = [200], bytes = new Uint8Array([1, 2, 
 }
 
 function deps(getConnectorToken: AttachmentDownloadDeps['getConnectorToken']): AttachmentDownloadDeps {
-  return { getConnectorToken, timeoutMs: 1000, slug: 'leoai' };
+  return { getConnectorToken, timeoutMs: 1000, bodyStallMs: 200, slug: 'leoai' };
 }
 
 const tokenOk = async () => 'CONNECTOR.JWT.TOKEN';
@@ -138,5 +138,139 @@ describe('w3 attachment-download — connector-token auth', () => {
       /no downloadUrl\/contentUrl/,
     );
     assert.equal(calls.length, 0);
+  });
+});
+
+/**
+ * w3 body-transfer resilience — the connector intermittently STALLS the response
+ * BODY after headers. The download streams the body under a per-chunk stall
+ * timeout and retries ONCE on a stall/transient, then fails open (caller drops
+ * the attachment, text still routes). Bodies are mocked as ReadableStreams whose
+ * chunk cadence we control; `bodyStallMs` is small so the suite runs fast.
+ */
+describe('w3 attachment-download — body-transfer resilience', () => {
+  const enc = new TextEncoder();
+
+  /**
+   * Build a streaming body. Emits `chunks` with `gapMs` between each; if `stall`
+   * is set, after the chunks the stream HANGS (no further bytes) so a reader idles
+   * and the per-chunk stall timer fires. The hang is settled cleanly on `cancel()`
+   * (and pending timers cleared) so the test leaves no dangling promise.
+   */
+  function streamBody(
+    chunks: Uint8Array[],
+    opts: { gapMs?: number; stall?: boolean } = {},
+  ): ReadableStream<Uint8Array> {
+    let i = 0;
+    let settlePending: (() => void) | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const clear = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (i < chunks.length) {
+          const chunk = chunks[i];
+          i += 1;
+          return new Promise<void>((resolve) => {
+            settlePending = resolve;
+            timer = setTimeout(() => {
+              timer = null;
+              settlePending = null;
+              controller.enqueue(chunk);
+              resolve();
+            }, opts.gapMs ?? 0);
+          });
+        }
+        if (opts.stall) {
+          // Hang until the reader is cancelled (the stall timer fires upstream).
+          return new Promise<void>((resolve) => {
+            settlePending = resolve;
+          });
+        }
+        controller.close();
+        return undefined;
+      },
+      cancel() {
+        clear();
+        if (settlePending) {
+          const resolve = settlePending;
+          settlePending = null;
+          resolve();
+        }
+      },
+    });
+  }
+
+  /** Mock fetch that returns a 200 with the queued streaming body, one per call. */
+  function installBodyFetch(bodies: ReadableStream<Uint8Array>[]): void {
+    let i = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), auth: headers.get('authorization'), redirect: init?.redirect });
+      const body = bodies[Math.min(i, bodies.length - 1)];
+      i += 1;
+      return new Response(body, { status: 200 });
+    }) as typeof fetch;
+  }
+
+  it('body stall on the first attempt → retries once → succeeds', async () => {
+    // Attempt 1 delivers one chunk then hangs; attempt 2 streams cleanly.
+    installBodyFetch([
+      streamBody([enc.encode('part-')], { stall: true }),
+      streamBody([enc.encode('hello'), enc.encode('-world')]),
+    ]);
+
+    const bytes = await downloadAttachmentBytes(fileAtt, deps(tokenOk));
+
+    assert.equal(calls.length, 2); // one retry
+    assert.equal(Buffer.from(bytes).toString('utf8'), 'hello-world');
+  });
+
+  it('truly-hung body → fails open within a BOUNDED time (not ~unbounded)', async () => {
+    installBodyFetch([
+      streamBody([], { stall: true }),
+      streamBody([], { stall: true }),
+    ]);
+
+    const start = Date.now();
+    await assert.rejects(downloadAttachmentBytes(connectorAtt, deps(tokenOk)));
+    const elapsed = Date.now() - start;
+
+    assert.equal(calls.length, 2); // exactly two attempts (one transient retry), no unbounded loop
+    // Bound ≈ 2 × bodyStallMs(200) ≈ 400ms; assert well under a multiple — proves
+    // it does NOT hang for ~unbounded time. (Real prod bound ≈ 2 × 8s.)
+    assert.ok(elapsed < 2000, `fail-open took ${elapsed}ms — expected bounded (~2×stall)`);
+  });
+
+  it('slow-but-progressing body (gap < stall) → succeeds, no retry', async () => {
+    // Chunks 60ms apart, under the 200ms stall window — progress, not a stall.
+    installBodyFetch([
+      streamBody([enc.encode('a'), enc.encode('b'), enc.encode('c')], { gapMs: 60 }),
+    ]);
+
+    const bytes = await downloadAttachmentBytes(fileAtt, deps(tokenOk));
+
+    assert.equal(calls.length, 1); // no retry — slow is not stalled
+    assert.equal(Buffer.from(bytes).toString('utf8'), 'abc');
+  });
+
+  it('a header-phase transport error retries once then succeeds', async () => {
+    let i = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), auth: headers.get('authorization'), redirect: init?.redirect });
+      i += 1;
+      if (i === 1) throw new TypeError('network reset'); // transient on first attempt
+      return new Response(streamBody([enc.encode('ok-bytes')]), { status: 200 });
+    }) as typeof fetch;
+
+    const bytes = await downloadAttachmentBytes(fileAtt, deps(tokenOk));
+
+    assert.equal(calls.length, 2); // retried the transient
+    assert.equal(Buffer.from(bytes).toString('utf8'), 'ok-bytes');
   });
 });

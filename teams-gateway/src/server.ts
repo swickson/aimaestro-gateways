@@ -85,8 +85,15 @@ function extractStrippedText(activity: {
 
 /** Teams file-send wrapper content type — carries the real download URL + name. */
 const TEAMS_FILE_DOWNLOAD_INFO = 'application/vnd.microsoft.teams.file.download.info';
-/** Per-attachment HTTP leg timeout (download + Maestro upload/confirm/status). */
+/** Per-attachment HTTP leg timeout (download header arrival + Maestro upload/confirm/status). */
 const ATTACHMENT_TIMEOUT_MS = 20_000;
+/**
+ * Per-chunk body IDLE (stall) timeout for the inbound attachment download. The
+ * Bot Framework connector intermittently STALLS the response body after headers;
+ * this aborts a truly-stalled stream (no bytes for this long) without killing a
+ * slow-but-progressing transfer. A stall retries once before failing open.
+ */
+const ATTACHMENT_BODY_STALL_MS = 8_000;
 
 /**
  * Minimal extension -> MIME map. The gateway-declared content type is ADVISORY
@@ -222,7 +229,12 @@ async function buildBotApps(
         return null;
       }
     };
-    const downloadAttachment = buildAttachmentDownloader(bot.slug, getConnectorToken, ATTACHMENT_TIMEOUT_MS);
+    const downloadAttachment = buildAttachmentDownloader(
+      bot.slug,
+      getConnectorToken,
+      ATTACHMENT_TIMEOUT_MS,
+      ATTACHMENT_BODY_STALL_MS,
+    );
 
     app.on('message', async (ctx) => {
       // ACK-FAST: build the SDK-decoupled DTO synchronously, fire the pipeline
