@@ -35,6 +35,7 @@ import { toBotConfigs } from './bot-registry.js';
 import { handleInbound, type InboundActivity, type InboundDeps } from './inbound.js';
 import { rejectMismatchedRecipient } from './recipient-binding.js';
 import { createThreadStore, type ThreadStore } from './thread-store.js';
+import { createDmRouter } from './dm.js';
 import { createUserResolver, type UserResolver } from './user-resolver.js';
 import { startOutboundPoller, type OutboundBot } from './outbound.js';
 import { restoreThreadStore, saveThreadStore, startSnapshotTimer } from './thread-persistence.js';
@@ -244,12 +245,9 @@ function buildManagementRouter(
     });
   });
 
-  // STUB: proactive DM delivery (Phase 5). `botSlug` will be validated against the
-  // registry allowlist before it can pick a sending identity (§0.2).
-  router.post('/gateway/dm', (_req, res) => {
-    console.log('[TEAMS] POST /api/admin/gateway/dm — STUB (Phase 5, not implemented).');
-    res.status(501).json({ error: 'not_implemented', phase: 5 });
-  });
+  // Proactive DM delivery is mounted separately at `/api/gateway/dm` (its own
+  // ADMIN_TOKEN-gated group — the path Maestro's notifyUser POSTs), so it is NOT
+  // a route on this management router. See `mountGatewayDm` in main().
 
   return router;
 }
@@ -348,6 +346,29 @@ async function main(): Promise<void> {
   // Per-bot Teams adapters — register the public `/api/<slug>/messages` routes.
   const apps = await buildBotApps(adapter, config, registrations, inboundServices);
 
+  // Proactive DM endpoint (Phase 5) — mounted AFTER buildBotApps so the slug->App
+  // map exists. Its own ADMIN_TOKEN-gated group at `/api/gateway` (the path
+  // Maestro's notifyUser POSTs); `sendChunk` binds delivery to the originating
+  // bot's own `App.send` (same proactive send shape the outbound poller uses).
+  httpApp.use(
+    '/api/gateway',
+    createDmRouter({
+      threadStore,
+      knownBots: new Set(apps.keys()),
+      markdownDefault: config.markdownDefault,
+      adminToken: config.adminToken,
+      sendChunk: async (botSlug, conversationId, text, markdown) => {
+        const app = apps.get(botSlug);
+        if (!app) throw new Error(`no App for bot '${botSlug}'`);
+        await app.send(conversationId, {
+          type: 'message',
+          text,
+          ...(markdown ? {} : { textFormat: 'plain' }),
+        });
+      },
+    }),
+  );
+
   // Outbound delivery (Phase 3): poll each registered bot's AMP inbox for agent
   // replies and post them back under that bot. Under dry-run nothing registered,
   // so there are no inboxes to poll and the poller is not started.
@@ -379,7 +400,7 @@ async function main(): Promise<void> {
   console.log('Endpoints:');
   console.log('  GET  /health             - Health check (public)');
   console.log('  GET  /api/admin/stats    - Gateway state (ADMIN_TOKEN)');
-  console.log('  POST /api/admin/gateway/dm - Outbound DM (ADMIN_TOKEN) [STUB Phase 5]');
+  console.log('  POST /api/gateway/dm     - Proactive DM (ADMIN_TOKEN)');
   for (const bot of config.bots) {
     console.log(`  POST ${messagingPath(bot.slug)}  - ${bot.slug} inbound (Bot Service JWT)`);
   }

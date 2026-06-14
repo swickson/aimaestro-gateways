@@ -362,6 +362,30 @@ describe('Teams thread-store persistence', () => {
       assert.equal(store.size(), 0, name);
     }
   });
+
+  it('accepts a pre-Phase-5 entry missing aadObjectId (graceful schema skew)', () => {
+    const root = tempDir();
+    const file = path.join(root, 'legacy.json');
+    const legacy = entry();
+    delete (legacy as { aadObjectId?: string }).aadObjectId;
+    fs.writeFileSync(file, JSON.stringify({ version: 1, entries: [legacy] }), 'utf-8');
+
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    // Not dropped — the snapshot restores, but the entry is NOT DM-indexed.
+    assert.equal(restoreThreadStore(store, file), 1);
+    assert.equal(store.findByAmpMessageId('maestro', 'amp-inbound-1')?.ampMessageId, 'amp-inbound-1');
+  });
+
+  it('rejects an entry whose aadObjectId is present but not a string', () => {
+    const root = tempDir();
+    const file = path.join(root, 'bad-aad.json');
+    const bad = { ...entry(), aadObjectId: 42 };
+    fs.writeFileSync(file, JSON.stringify({ version: 1, entries: [bad] }), 'utf-8');
+
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    assert.equal(restoreThreadStore(store, file), 0);
+    assert.equal(store.size(), 0);
+  });
 });
 
 describe('Teams thread-store expiry and recency', () => {
