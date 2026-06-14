@@ -274,3 +274,70 @@ describe('w3 attachment-download — body-transfer resilience', () => {
     assert.equal(Buffer.from(bytes).toString('utf8'), 'ok-bytes');
   });
 });
+
+/**
+ * w3 follow-up — resource-leak teardown. After headers arrive, TWO paths abandon a
+ * `Response` WITHOUT consuming its body: (a) the 401/403 token-retry `continue` and
+ * (b) the non-ok fail-open `throw`. An un-consumed body leaks the socket to
+ * undici/GC. The download must `cancel()` the body before EITHER path. Bodies here
+ * track their own `cancel()` count so we can assert the abandoned body was released.
+ */
+describe('w3 attachment-download — abandoned-Response body teardown', () => {
+  const enc = new TextEncoder();
+
+  /** A streaming body that streams `bytes` and counts how many times it is cancelled. */
+  function countingBody(
+    bytes: Uint8Array | null,
+  ): { stream: ReadableStream<Uint8Array>; cancelCount: () => number } {
+    let count = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (bytes) controller.enqueue(bytes);
+        controller.close();
+      },
+      cancel() {
+        count += 1;
+      },
+    });
+    return { stream, cancelCount: () => count };
+  }
+
+  it('401 token-retry: the FIRST (401) response body is cancelled before the retry', async () => {
+    // Bare pre-auth path unexpectedly 401s WITH a body, then succeeds with the token.
+    const first = countingBody(enc.encode('401-error-page')); // abandoned on retry
+    const second = countingBody(enc.encode('ok')); // consumed on the 2nd attempt
+    let i = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), auth: headers.get('authorization'), redirect: init?.redirect });
+      i += 1;
+      return i === 1
+        ? new Response(first.stream, { status: 401 })
+        : new Response(second.stream, { status: 200 });
+    }) as typeof fetch;
+
+    const bytes = await downloadAttachmentBytes(fileAtt, deps(tokenOk));
+
+    assert.equal(calls.length, 2); // 401 then token retry
+    assert.ok(first.cancelCount() >= 1, 'the abandoned 401 body must be cancelled, not leaked');
+    assert.equal(Buffer.from(bytes).toString('utf8'), 'ok');
+  });
+
+  it('non-ok fail-open: the final response body is cancelled before the throw', async () => {
+    // Connector path authed up front → single 401 (no further auth retry) → fail open.
+    const only = countingBody(enc.encode('403-or-401-page'));
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ url: String(input), auth: headers.get('authorization'), redirect: init?.redirect });
+      return new Response(only.stream, { status: 401 });
+    }) as typeof fetch;
+
+    await assert.rejects(
+      downloadAttachmentBytes(connectorAtt, deps(tokenOk)),
+      /download failed \(401\)/,
+    );
+
+    assert.equal(calls.length, 1); // authed up front; no second auth attempt
+    assert.ok(only.cancelCount() >= 1, 'the abandoned non-ok body must be cancelled, not leaked');
+  });
+});

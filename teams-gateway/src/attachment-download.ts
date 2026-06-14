@@ -82,6 +82,24 @@ function classifyError(err: unknown): string {
 }
 
 /**
+ * Cancel an un-consumed `Response` body so an abandoned post-headers attempt does
+ * NOT leak the socket to undici/GC. Called on EVERY path that drops a `Response`
+ * after its headers arrive but WITHOUT handing the body to
+ * `readBodyWithStallTimeout` — i.e. the 401/403 token-retry `continue` and the
+ * non-ok fail-open `throw`. Best-effort: a `cancel()` rejection (already-errored /
+ * locked body) is swallowed — there is nothing left to release in that case. The
+ * happy path (body consumed) and the stall path (already abort()+cancel()'d) never
+ * route here.
+ */
+async function discardBody(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    // body already errored or locked — socket teardown is out of our hands
+  }
+}
+
+/**
  * Fetch a URL's HEADERS under a header-arrival timeout, returning the `Response`
  * (body not yet consumed) and the live `AbortController`. The header timer is
  * cleared the moment headers arrive — the controller then governs the BODY read
@@ -255,6 +273,8 @@ export async function downloadAttachmentBytes(
         mintMs = Date.now() - mintStart;
         tokenPresent = token !== null;
         if (token) {
+          // Abandon this 401 Response → release its un-consumed body before retrying.
+          await discardBody(res);
           triedAuth = true;
           retries += 1;
           continue;
@@ -270,6 +290,8 @@ export async function downloadAttachmentBytes(
           );
         }
         outcome = `status ${res.status}`;
+        // Fail open → release this non-ok Response's un-consumed body before throwing.
+        await discardBody(res);
         throw new Error(`download failed (${res.status})`);
       }
 
