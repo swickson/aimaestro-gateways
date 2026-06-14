@@ -134,6 +134,12 @@ function isThreadEntry(value: unknown): value is ThreadEntry {
   if (!isFiniteNumber(e.createdAt)) return false;
   // recordedAt is optional, but if present it must be a usable clock value.
   if (e.recordedAt !== undefined && !isFiniteNumber(e.recordedAt)) return false;
+  // aadObjectId (Phase 5) is GRACEFUL: a pre-Phase-5 snapshot predates the field,
+  // so absent is accepted (schema-version skew, not corruption) — such an entry
+  // stays reply-deliverable, just not DM-indexed (the store skips by-user indexing
+  // when it's missing). But if PRESENT it must be a string (no junk poisons the
+  // by-user keys). New writes always set it (the write path requires it).
+  if (e.aadObjectId !== undefined && typeof e.aadObjectId !== 'string') return false;
 
   // context: full ConversationReference + rootActivityId + tenantId.
   if (typeof e.context !== 'object' || e.context === null) return false;
