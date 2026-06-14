@@ -11,7 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as dotenv from 'dotenv';
 import { loadBotRegistry } from './bot-registry.js';
-import type { GatewayConfig, OperatorAadRef } from './types.js';
+import type { AttachmentPolicy, GatewayConfig, OperatorAadRef } from './types.js';
 
 dotenv.config();
 
@@ -19,6 +19,20 @@ const TRUTHY = new Set(['1', 'true', 'yes', 'on']);
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 const DEFAULT_CACHE_USER_TTL_MS = 300_000; // 5 min (shared CACHE_USER_TTL_MS default).
 const DEFAULT_SNAPSHOT_INTERVAL_MS = 60_000; // 60s crash-safety floor between graceful saves.
+// Attachment policy defaults (w3). 25MB mirrors Maestro's AMP_MAX_ATTACHMENT_BYTES.
+const DEFAULT_ATTACH_MAX_BYTES = 26_214_400;
+const DEFAULT_ATTACH_MAX_COUNT = 10;
+// Known-dangerous executable content types, denied gateway-side (Whistler-owned;
+// values tunable via TEAMS_ATTACH_DENY_TYPES). Maestro still magic-byte sniffs at confirm.
+const DEFAULT_ATTACH_DENY_TYPES = [
+  'application/x-msdownload',
+  'application/x-msdos-program',
+  'application/x-dosexec',
+  'application/vnd.microsoft.portable-executable',
+  'application/x-sh',
+  'application/x-executable',
+  'application/x-mach-binary',
+];
 
 /**
  * Parse a positive-integer env var with a default. Invalid (non-numeric, <=0)
@@ -43,6 +57,25 @@ function isTruthy(raw: string | undefined): boolean {
 function parseHosts(raw: string | undefined): string[] {
   if (!raw || raw.trim() === '') return ['127.0.0.1'];
   return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/** Comma-separated, lower-cased, trimmed content-type list (overrides default deny). */
+function parseContentTypeList(raw: string | undefined, fallback: string[]): string[] {
+  if (raw === undefined) return fallback;
+  // An explicitly-empty value disables the deny-list (operator opt-out).
+  return raw
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/** Build the w3 attachment policy from env (caps fail-fast; Maestro re-checks at confirm). */
+function loadAttachmentPolicy(): AttachmentPolicy {
+  return {
+    maxBytes: parsePositiveInt(process.env.TEAMS_ATTACH_MAX_BYTES, DEFAULT_ATTACH_MAX_BYTES, 'TEAMS_ATTACH_MAX_BYTES'),
+    maxCount: parsePositiveInt(process.env.TEAMS_ATTACH_MAX_COUNT, DEFAULT_ATTACH_MAX_COUNT, 'TEAMS_ATTACH_MAX_COUNT'),
+    denyContentTypes: parseContentTypeList(process.env.TEAMS_ATTACH_DENY_TYPES, DEFAULT_ATTACH_DENY_TYPES),
+  };
 }
 
 /**
@@ -105,6 +138,7 @@ export function loadConfig(): GatewayConfig {
     },
     // Markdown is the default render; TEAMS_MARKDOWN=0/false flips to plain text.
     markdownDefault: process.env.TEAMS_MARKDOWN === undefined ? true : isTruthy(process.env.TEAMS_MARKDOWN),
+    attachments: loadAttachmentPolicy(),
     cacheUserTtlMs: parsePositiveInt(process.env.CACHE_USER_TTL_MS, DEFAULT_CACHE_USER_TTL_MS, 'CACHE_USER_TTL_MS'),
     threadStorePath,
     snapshotIntervalMs: parsePositiveInt(
