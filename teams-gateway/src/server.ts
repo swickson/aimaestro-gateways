@@ -33,12 +33,14 @@ import { Cache } from '@aimaestro/common/cache.js';
 import { loadConfig } from './config.js';
 import { toBotConfigs } from './bot-registry.js';
 import { handleInbound, type InboundActivity, type InboundDeps } from './inbound.js';
-import type { DownloadAttachment, RawInboundAttachment } from './attachments-inbound.js';
+import type { RawInboundAttachment } from './attachments-inbound.js';
+import { buildAttachmentDownloader, type ConnectorTokenGetter } from './attachment-download.js';
 import { rejectMismatchedRecipient } from './recipient-binding.js';
 import { createThreadStore, type ThreadStore } from './thread-store.js';
 import { createDmRouter } from './dm.js';
 import { createUserResolver, type UserResolver } from './user-resolver.js';
 import { startOutboundPoller, type OutboundBot } from './outbound.js';
+import { loadMeshOrigins } from './mesh-hosts.js';
 import { restoreThreadStore, saveThreadStore, startSnapshotTimer } from './thread-persistence.js';
 import type { GatewayConfig } from './types.js';
 
@@ -142,45 +144,6 @@ function extractInboundAttachments(activity: { attachments?: SdkAttachment[] }):
   return out;
 }
 
-/**
- * Decode a `data:` URI into bytes (inline attachment fast-path — no network).
- * Returns null if `value` is not a base64 data URI.
- */
-function decodeDataUri(value: string): Uint8Array | null {
-  const match = /^data:[^;,]*;base64,(.*)$/s.exec(value);
-  if (!match) return null;
-  return new Uint8Array(Buffer.from(match[1], 'base64'));
-}
-
-/**
- * Build the per-activity byte downloader bound to this inbound `ctx`. SDK-coupling
- * lives HERE (server.ts) so inbound.ts / attachments-inbound.ts stay SDK-free.
- *   - Teams `file.download.info` `downloadUrl` is pre-authenticated — GET directly.
- *   - inline `data:` URIs decode locally.
- *   - other `contentUrl` (e.g. connector `/v3/attachments`) is fetched best-effort;
- *     the connector-token path is a LIVE-AZURE WATCH ITEM (same class as the
- *     Fork-O1 App.send unknown) — a 401/403 here fails OPEN (the attachment drops,
- *     the text still routes) and is logged loudly.
- */
-function buildAttachmentDownloader(slug: string): DownloadAttachment {
-  return async (attachment: RawInboundAttachment): Promise<Uint8Array> => {
-    const url = attachment.downloadUrl ?? attachment.contentUrl;
-    if (!url) throw new Error('attachment has no downloadUrl/contentUrl');
-
-    const inline = decodeDataUri(url);
-    if (inline) return inline;
-
-    const res = await fetch(url, { signal: AbortSignal.timeout(ATTACHMENT_TIMEOUT_MS) });
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        console.error(`[TEAMS] (${slug}) attachment download ${res.status} (connector-token path — live-Azure watch item) for '${attachment.name}'.`);
-      }
-      throw new Error(`download failed (${res.status})`);
-    }
-    return new Uint8Array(await res.arrayBuffer());
-  };
-}
-
 /** Per-bot runtime state surfaced on `/health`. */
 interface BotRuntime {
   slug: string;
@@ -246,7 +209,20 @@ async function buildBotApps(
       timeoutMs: ROUTE_TIMEOUT_MS,
       debug: config.debug,
     };
-    const downloadAttachment = buildAttachmentDownloader(bot.slug);
+    // Connector-token source for authenticating inbound inline-image `contentUrl`
+    // downloads (Bot Framework connector). SDK coupling stays HERE: the per-bot App
+    // mints its own connector token. Fail-open → null so the downloader still tries
+    // (and drops the attachment on 401) rather than crashing the inbound pipeline.
+    const getConnectorToken: ConnectorTokenGetter = async () => {
+      try {
+        const token = await app.tokenManager.getBotToken();
+        return token?.toString() ?? null;
+      } catch (err) {
+        console.error(`[TEAMS] (${bot.slug}) connector token fetch failed: ${(err as Error).message}`);
+        return null;
+      }
+    };
+    const downloadAttachment = buildAttachmentDownloader(bot.slug, getConnectorToken, ATTACHMENT_TIMEOUT_MS);
 
     app.on('message', async (ctx) => {
       // ACK-FAST: build the SDK-decoupled DTO synchronously, fire the pipeline
@@ -305,7 +281,16 @@ function buildOutboundBots(
   config: GatewayConfig,
   registrations: Map<string, BotRegistration>,
   apps: Map<string, App>,
+  meshOrigins: ReadonlySet<string>,
 ): OutboundBot[] {
+  // Trusted-origin allowlist for outbound attachment pulls: this gateway's own
+  // maestroUrl origin (baseline — keeps same-host config working + degrades safely
+  // when hosts.json is absent) UNION the enabled mesh-host origins. Computed once;
+  // a hosts.json change needs a gateway restart to take effect.
+  const allowedOrigins: ReadonlySet<string> = new Set([
+    new URL(config.amp.maestroUrl).origin,
+    ...meshOrigins,
+  ]);
   const bots: OutboundBot[] = [];
   for (const bot of config.bots) {
     const registration = registrations.get(bot.slug);
@@ -315,6 +300,7 @@ function buildOutboundBots(
       slug: bot.slug,
       inboxDir: registration.inboxDir,
       maestroUrl: config.amp.maestroUrl,
+      allowedOrigins,
       configuredServiceUrl: app.api.serviceUrl,
       send: async (conversationId, text, markdown, attachments) => {
         await app.send(conversationId, {
@@ -491,7 +477,21 @@ async function main(): Promise<void> {
   // Outbound delivery (Phase 3): poll each registered bot's AMP inbox for agent
   // replies and post them back under that bot. Under dry-run nothing registered,
   // so there are no inboxes to poll and the poller is not started.
-  const outboundBots = buildOutboundBots(config, registrations, apps);
+  // Load the trusted mesh-host origin allowlist ONCE at startup (restart to refresh).
+  // Outbound attachment download urls are accepted only when their origin is in this
+  // set ∪ the maestroUrl origin. An EMPTY mesh set means signed urls carrying a remote
+  // host's Tailscale origin will be rejected — i.e. outbound attachments are effectively
+  // OFF — so warn loud and unmistakably in the startup log.
+  const meshOrigins = loadMeshOrigins();
+  if (meshOrigins.size === 0) {
+    console.warn(
+      '[MESH] ⚠️  NO mesh-host origins loaded — OUTBOUND ATTACHMENTS to remote/mesh hosts are DISABLED ' +
+        '(only this gateway\'s own maestroUrl origin is trusted). Fix ~/.aimaestro/hosts.json and restart to enable.',
+    );
+  } else {
+    console.log(`[MESH] trusted outbound attachment origins: ${[...meshOrigins].join(', ')}`);
+  }
+  const outboundBots = buildOutboundBots(config, registrations, apps, meshOrigins);
   let stopOutbound: (() => void) | null = null;
   let stopSnapshot: (() => void) | null = null;
   if (outboundBots.length > 0) {
