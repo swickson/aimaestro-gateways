@@ -75,7 +75,7 @@ function attachment(overrides: Partial<AMPAttachmentV1> = {}): AMPAttachmentV1 {
     filename: 'report.pdf',
     content_type: 'application/pdf',
     size: 4,
-    digest: 'd',
+    digest: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
     url: 'https://maestro.test/api/v1/attachments/att-1/download?sig=abc',
     scan_status: 'basic_clean',
     uploaded_at: '2026-06-14T00:00:00.000Z',
@@ -127,6 +127,7 @@ function setup(): { bot: OutboundBot; sends: SentRecord[]; fetched: Array<{ url:
     slug: 'maestro',
     inboxDir: inbox,
     maestroUrl: 'https://maestro.test',
+    allowedOrigins: new Set(['https://maestro.test']),
     send: async (_conversationId, text, _markdown, attachments) => {
       sends.push({ text, attachments });
     },
@@ -269,6 +270,7 @@ describe('w3 outbound attachment hardening (descriptor trust)', () => {
       slug: 'maestro',
       inboxDir: inbox,
       maestroUrl: 'https://maestro.test',
+      allowedOrigins: new Set(['https://maestro.test']),
       send: async (_conversationId, text, _markdown, attachments) => {
         sends.push({ text, attachments });
       },
