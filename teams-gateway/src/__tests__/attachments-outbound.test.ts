@@ -101,6 +101,7 @@ function setup(): { bot: OutboundBot; sends: SentRecord[]; fetched: Array<{ url:
   const bot: OutboundBot = {
     slug: 'maestro',
     inboxDir: inbox,
+    maestroUrl: 'https://maestro.test',
     send: async (_conversationId, text, _markdown, attachments) => {
       sends.push({ text, attachments });
     },
@@ -172,6 +173,18 @@ describe('w3 outbound attachment delivery', () => {
     const pull = fetched.find((f) => f.url.includes('/download'));
     assert.ok(pull, 'signed-url GET happened');
     assert.equal(pull!.auth, undefined);
+  });
+
+  it('does not fetch attachment URLs outside the configured Maestro origin', async () => {
+    console.log = () => undefined;
+    console.error = () => undefined;
+    const { bot, sends, fetched, inbox } = setup();
+    const filePath = writeReply(inbox, '', [attachment({ url: 'https://evil.test/internal' })]);
+    await runPoller(bot);
+
+    assert.equal(fetched.length, 0);
+    assert.equal(sends.length, 0);
+    assert.equal(fs.existsSync(filePath), true);
   });
 
   it('attachment-only whose pull FAILS is left for retry (not deleted, no send)', async () => {

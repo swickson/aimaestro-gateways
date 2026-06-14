@@ -97,6 +97,10 @@ function declaredContentType(raw: string): string {
   return raw && raw.includes('/') ? raw : 'application/octet-stream';
 }
 
+function isRoutableScanStatus(status: AMPAttachmentV1['scan_status']): boolean {
+  return status === 'clean' || status === 'basic_clean';
+}
+
 /**
  * Ingest all attachments on one inbound Teams message. Enforces the gateway count
  * cap (extras dropped + logged), per-attachment deny-list + size cap (fail-fast),
@@ -228,6 +232,9 @@ async function uploadAttachment(att: RawInboundAttachment, bytes: Uint8Array, de
   );
   if (!status.url) {
     throw new Error(`status returned no signed url (scan_status=${status.scan_status})`);
+  }
+  if (!isRoutableScanStatus(status.scan_status)) {
+    throw new Error(`status scan_status=${status.scan_status} is not routable`);
   }
 
   // 6. Assemble the LOCKED wire descriptor, server-authoritative fields from /status.

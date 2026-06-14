@@ -106,6 +106,7 @@ describe('Teams outbound reply poller', () => {
       {
         slug: 'maestro',
         inboxDir: maestroInbox,
+        maestroUrl: 'https://maestro.test',
         send: async (conversationId, text, markdown) => {
           sends.push({ slug: 'maestro', conversationId, text, markdown });
         },
@@ -113,6 +114,7 @@ describe('Teams outbound reply poller', () => {
       {
         slug: 'echo',
         inboxDir: echoInbox,
+        maestroUrl: 'https://maestro.test',
         send: async (conversationId, text, markdown) => {
           sends.push({ slug: 'echo', conversationId, text, markdown });
         },
@@ -152,6 +154,7 @@ describe('Teams outbound reply poller', () => {
       bots: [{
         slug: 'maestro',
         inboxDir: inbox,
+        maestroUrl: 'https://maestro.test',
         send: async () => {
           sendCalls += 1;
           throw new Error('transport down');
@@ -189,6 +192,7 @@ describe('Teams outbound reply poller', () => {
       bots: [{
         slug: 'maestro',
         inboxDir: inbox,
+        maestroUrl: 'https://maestro.test',
         send: async () => {
           throw new Error('should not send without a thread mapping');
         },
@@ -230,6 +234,7 @@ describe('Teams outbound reply poller', () => {
       bots: [{
         slug: 'maestro',
         inboxDir: inbox,
+        maestroUrl: 'https://maestro.test',
         send: async (_conversationId, text) => {
           chunks.push(text);
         },
@@ -267,6 +272,7 @@ describe('Teams outbound reply poller', () => {
       bots: [{
         slug: 'maestro',
         inboxDir: inbox,
+        maestroUrl: 'https://maestro.test',
         send: async () => {
           sendCalls += 1;
           await sendStarted;
