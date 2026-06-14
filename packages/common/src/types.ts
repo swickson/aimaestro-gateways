@@ -65,10 +65,43 @@ export interface AMPEnvelope {
   expires_at?: string | null;
 }
 
+/**
+ * Attachment descriptor — the LOCKED gateway <-> Maestro wire type (mirror of
+ * ai-maestro `lib/types/amp.ts:190`; Maestro's `routeMessage` accepts `kind:'amp-v1'`
+ * VERBATIM and hard-rejects legacy shapes). The gateway never invents these: it
+ * runs Maestro's `upload -> PUT -> confirm -> status` flow and assembles this from
+ * the `GET /api/v1/attachments/:id/status` response (the only call that yields the
+ * signed `url` + server-sanitized `filename`). `url` is the HMAC-signed download
+ * link — present only once `scan_status` is `clean`/`basic_clean` — and is itself
+ * the auth for `GET .../download` (no Bearer).
+ */
+export interface AMPAttachmentV1 {
+  kind: 'amp-v1';
+  /** Maestro attachment id. */
+  id: string;
+  /** Server-sanitized filename (from /status — confirm does not return it). */
+  filename: string;
+  /** Server-sniffed content type (authoritative). */
+  content_type: string;
+  /** Byte size (server-authoritative). */
+  size: number;
+  /** sha256 hex, server-computed from the streamed bytes. */
+  digest: string;
+  /** HMAC-signed download URL; present only when scan_status is clean/basic_clean. */
+  url: string;
+  /** Scan lifecycle: pending -> basic_clean (confirm) / rejected (confirm fail) / clean. */
+  scan_status: 'pending' | 'basic_clean' | 'clean' | 'rejected';
+  uploaded_at: string;
+  expires_at: string;
+}
+
 export interface AMPPayload {
   type: string;
   message: string;
   context?: EnrichedContext | null;
+  /** Attachments cited on a routed/replied message (optional; gateways that don't
+   *  support attachments neither set nor read this — discord is untouched). */
+  attachments?: AMPAttachmentV1[];
 }
 
 export interface AMPMessage {
@@ -95,6 +128,9 @@ export interface AMPRouteRequest {
     type: string;
     message: string;
     context?: EnrichedContext;
+    /** Attachments cited on the routed message (optional; bytes are NOT sent on
+     *  /route — only the post-confirm AMPAttachmentV1 descriptors). */
+    attachments?: AMPAttachmentV1[];
   };
 }
 

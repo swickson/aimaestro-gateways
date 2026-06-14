@@ -78,6 +78,7 @@ function makeDeps(overrides: Partial<InboundDeps> = {}): InboundDeps & { threadS
     },
     threadStore: createThreadStore(),
     dedupe: new Cache<true>(60_000),
+    attachmentPolicy: { maxBytes: 26_214_400, maxCount: 10, denyContentTypes: [] },
     timeoutMs: 1000,
     debug: false,
     now: () => 1_000_000,
