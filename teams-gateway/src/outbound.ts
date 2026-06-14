@@ -32,7 +32,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AMPAttachmentV1, AMPMessage } from './types.js';
+import type { AMPAttachmentV1, AMPMessage, AttachmentPolicy } from './types.js';
 import type { ThreadStore } from './thread-store.js';
 import { formatReply } from './format.js';
 
@@ -73,41 +73,178 @@ export interface OutboundDeps {
   pollIntervalMs: number;
   /** Render replies as markdown (default) vs plain text. */
   markdownDefault: boolean;
+  /**
+   * Gateway attachment policy (w3 hardening). The OUTBOUND consume path reads
+   * `payload.attachments` from the AGENT-controlled inbox JSON, so every cited
+   * descriptor is re-validated against this policy (caps, scan_status, url
+   * origin+path) BEFORE any byte is pulled — mirroring the inbound enforcement.
+   */
+  policy: AttachmentPolicy;
   debug: boolean;
 }
 
 /**
+ * Outcome of pulling one message's cited attachments. The two failure tallies drive
+ * the caller's file-lifecycle decision (DROP vs leave-for-retry):
+ *   - `validationDrops` — descriptor failed POLICY validation (malformed/hostile:
+ *     bad kind, non-routable scan_status, missing id/filename, over-cap or lying
+ *     size, off-origin/off-path url, deny-listed type, count over cap). These never
+ *     self-heal, so a reply whose attachments are ALL validation-dropped is deleted,
+ *     not retried.
+ *   - `pullFailures` — descriptor was VALID but the network pull failed (non-2xx,
+ *     timeout, redirect rejected, connection error). Possibly transient → the caller
+ *     leaves the file for a later retry (never drop legitimate agent data).
+ */
+interface PullResult {
+  pulled: OutboundAttachment[];
+  validationDrops: number;
+  pullFailures: number;
+}
+
+/** A size-cap violation discovered DURING the pull (lying/oversize body) — a DROP, not a retry. */
+class AttachmentOverCapError extends Error {}
+
+/**
+ * Validate ONE agent-supplied descriptor against the gateway policy. Returns a
+ * human-readable reason string when invalid, or `null` when it passes. Every field
+ * is checked at RUNTIME (the JSON is agent-controlled — the static `AMPAttachmentV1`
+ * type is not a guarantee). The url must be same-origin as the configured Maestro
+ * AND its path EXACTLY `/api/v1/attachments/<id>/download` with `<id>` === the
+ * descriptor's own id — closing the "same-origin but arbitrary internal path" (e.g.
+ * `/api/v1/agents`) SSRF angle on top of Whistler's origin pin.
+ */
+function validateOutboundDescriptor(
+  att: AMPAttachmentV1,
+  maestroOrigin: string,
+  policy: AttachmentPolicy,
+): string | null {
+  if (att.kind !== 'amp-v1') return `kind '${String(att.kind)}' is not amp-v1`;
+  if (att.scan_status !== 'clean' && att.scan_status !== 'basic_clean') {
+    return `scan_status '${String(att.scan_status)}' is not routable`;
+  }
+  if (typeof att.id !== 'string' || att.id.trim() === '') return 'missing/empty id';
+  if (typeof att.filename !== 'string' || att.filename.trim() === '') return 'missing/empty filename';
+  if (typeof att.size !== 'number' || !Number.isFinite(att.size) || att.size <= 0) {
+    return `invalid size ${String(att.size)}`;
+  }
+  if (att.size > policy.maxBytes) return `declared size ${att.size}B exceeds cap ${policy.maxBytes}B`;
+  const ct = (typeof att.content_type === 'string' ? att.content_type : '').toLowerCase();
+  if (policy.denyContentTypes.some((deny) => ct.includes(deny))) {
+    return `content-type '${att.content_type}' is deny-listed`;
+  }
+  if (typeof att.url !== 'string' || att.url.trim() === '') return 'missing/empty url';
+  let url: URL;
+  try {
+    url = new URL(att.url);
+  } catch {
+    return 'unparseable url';
+  }
+  if (url.origin !== maestroOrigin) return `url origin '${url.origin}' is not Maestro`;
+  const expectedPath = `/api/v1/attachments/${att.id}/download`;
+  if (url.pathname !== expectedPath) return `url path '${url.pathname}' != '${expectedPath}'`;
+  return null;
+}
+
+/**
+ * Read a response body into bytes WITHOUT unbounded materialization: reject up front
+ * if a declared `Content-Length` exceeds the cap, then cap the ACTUAL streamed bytes
+ * (defeats an oversize body that omits Content-Length). Throws `AttachmentOverCapError`
+ * on a size violation. Replaces a blind `res.arrayBuffer()`.
+ */
+async function readBoundedBody(res: Response, maxBytes: number): Promise<Uint8Array> {
+  const lenHeader = res.headers.get('content-length');
+  if (lenHeader !== null) {
+    const declaredLen = Number(lenHeader);
+    if (Number.isFinite(declaredLen) && declaredLen > maxBytes) {
+      throw new AttachmentOverCapError(`Content-Length ${declaredLen}B exceeds cap ${maxBytes}B`);
+    }
+  }
+  const body = res.body;
+  if (!body) {
+    // No stream available — fall back to arrayBuffer but still enforce the cap.
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.byteLength > maxBytes) {
+      throw new AttachmentOverCapError(`body ${buf.byteLength}B exceeds cap ${maxBytes}B`);
+    }
+    return buf;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined); // stop pulling bytes immediately
+      throw new AttachmentOverCapError(`streamed body exceeds cap ${maxBytes}B`);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+/**
  * Pull bytes for each cited attachment from its HMAC-signed download url (the url
- * IS the auth — NO Bearer). Returns only the successfully-pulled attachments; a
- * failed pull is logged and dropped (the caller decides leave-for-retry vs deliver
- * text-only). Never throws.
+ * IS the auth — NO Bearer). Each descriptor is POLICY-VALIDATED before any byte is
+ * fetched; the fetch follows NO redirects (`redirect:'error'`, so a 3xx off the
+ * pinned origin can't bypass the origin pin) and the body is BOUNDED at the size
+ * cap. Returns the successfully-pulled attachments plus failure tallies; never throws.
  */
 async function pullOutboundAttachments(
   bot: OutboundBot,
   declared: AMPAttachmentV1[],
   fileName: string,
-): Promise<OutboundAttachment[]> {
-  const out: OutboundAttachment[] = [];
+  policy: AttachmentPolicy,
+): Promise<PullResult> {
+  const result: PullResult = { pulled: [], validationDrops: 0, pullFailures: 0 };
   const maestroOrigin = new URL(bot.maestroUrl).origin;
-  for (const att of declared) {
+
+  // Count cap: never pull more than maxCount; the extras are a policy DROP.
+  let toProcess = declared;
+  if (declared.length > policy.maxCount) {
+    const dropped = declared.length - policy.maxCount;
+    console.error(`[OUTBOUND] (${bot.slug}) ${fileName}: ${declared.length} cited attachments exceeds cap ${policy.maxCount} — dropping ${dropped}.`);
+    result.validationDrops += dropped;
+    toProcess = declared.slice(0, policy.maxCount);
+  }
+
+  for (const att of toProcess) {
+    const invalid = validateOutboundDescriptor(att, maestroOrigin, policy);
+    if (invalid) {
+      // Malformed/hostile descriptor — DROP it (won't self-heal). Loud, never silent.
+      result.validationDrops += 1;
+      console.error(`[OUTBOUND] (${bot.slug}) ${fileName}: rejecting attachment descriptor '${String(att?.filename)}' (${invalid}) — dropping.`);
+      continue;
+    }
     try {
-      if (!att.url) throw new Error('descriptor has no signed url');
-      const url = new URL(att.url);
-      if (url.origin !== maestroOrigin) {
-        throw new Error(`download url origin is not Maestro (${url.origin})`);
-      }
-      const res = await fetch(url, { signal: AbortSignal.timeout(ATTACHMENT_PULL_TIMEOUT_MS) });
-      if (!res.ok) throw new Error(`download ${res.status}`);
-      out.push({
-        filename: att.filename,
-        contentType: att.content_type,
-        bytes: new Uint8Array(await res.arrayBuffer()),
+      const res = await fetch(att.url, {
+        signal: AbortSignal.timeout(ATTACHMENT_PULL_TIMEOUT_MS),
+        redirect: 'error', // a 3xx off the pinned origin must NOT be followed (Watson F2)
       });
+      if (!res.ok) throw new Error(`download ${res.status}`);
+      const bytes = await readBoundedBody(res, policy.maxBytes);
+      result.pulled.push({ filename: att.filename, contentType: att.content_type, bytes });
     } catch (e) {
-      console.error(`[OUTBOUND] (${bot.slug}) failed to pull attachment '${att.filename}' (${att.id}) for ${fileName}: ${(e as Error).message}`);
+      if (e instanceof AttachmentOverCapError) {
+        // Body violated the size cap — a lying/hostile descriptor, DROP (retry won't help).
+        result.validationDrops += 1;
+        console.error(`[OUTBOUND] (${bot.slug}) ${fileName}: attachment '${att.filename}' (${att.id}) over size cap — dropping: ${e.message}`);
+      } else {
+        // Valid descriptor, transient/network pull failure — leave for retry.
+        result.pullFailures += 1;
+        console.error(`[OUTBOUND] (${bot.slug}) failed to pull attachment '${att.filename}' (${att.id}) for ${fileName}: ${(e as Error).message}`);
+      }
     }
   }
-  return out;
+  return result;
 }
 
 export function startOutboundPoller(deps: OutboundDeps): () => void {
@@ -185,9 +322,15 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
         markdown: deps.markdownDefault,
       });
 
-      // w3 attachments: pull bytes for any cited descriptors (signed url = auth).
+      // w3 attachments: VALIDATE each agent-cited descriptor against policy, then pull
+      // bytes (signed url = auth; bounded read; no redirects). Validation failures are
+      // dropped (hostile/malformed); transient pull failures are tallied for retry.
       const declared = Array.isArray(msg.payload?.attachments) ? msg.payload.attachments : [];
-      const attachments = declared.length > 0 ? await pullOutboundAttachments(bot, declared, path.basename(filePath)) : [];
+      const pull =
+        declared.length > 0
+          ? await pullOutboundAttachments(bot, declared, path.basename(filePath), deps.policy)
+          : { pulled: [], validationDrops: 0, pullFailures: 0 };
+      const attachments = pull.pulled;
 
       // The outbound.ts:139 fix: "nothing to post" is now text AND attachments empty.
       // An attachment-only reply (empty text + attachments) must DELIVER, not delete.
@@ -198,14 +341,23 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
         return true;
       }
 
-      // Attachment-ONLY reply whose every pull failed: never drop agent data — leave
-      // for retry (warn-once, mirrors the no-mapping path) rather than delete.
+      // Attachment-ONLY reply with nothing delivered. Distinguish WHY (Columbo P1):
+      //   - a transient pull failure may self-heal → leave for retry (warn-once),
+      //     never drop legitimate agent data;
+      //   - but if EVERY descriptor failed policy validation (malformed/hostile) with
+      //     no transient failure, retry is pointless → DROP it (delete), don't spin.
       if (chunks.length === 0 && attachments.length === 0) {
-        if (!warnedUndeliverable.has(filePath)) {
-          console.error(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} is attachment-only but no attachment could be pulled — leaving for retry.`);
-          warnedUndeliverable.add(filePath);
+        if (pull.pullFailures > 0) {
+          if (!warnedUndeliverable.has(filePath)) {
+            console.error(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} is attachment-only but no attachment could be pulled — leaving for retry.`);
+            warnedUndeliverable.add(filePath);
+          }
+          return false;
         }
-        return false;
+        console.error(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} is attachment-only but all ${declared.length} cited descriptor(s) were rejected by policy — dropping (not retrying).`);
+        fs.unlinkSync(filePath);
+        warnedUndeliverable.delete(filePath);
+        return true;
       }
 
       for (const chunk of chunks) {
@@ -217,10 +369,10 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
         await bot.send(conversationId, '', markdown, attachments);
       }
 
-      // Text delivered but some/all attachments failed to pull: never block text —
-      // log loud (the lost attachment is accepted per the item-8 has-text policy).
+      // Text delivered but some/all attachments dropped (policy-rejected or pull-failed):
+      // never block text — log loud (the lost attachment is accepted per item-8 has-text).
       if (declared.length > attachments.length) {
-        console.error(`[OUTBOUND] (${bot.slug}) delivered text + ${attachments.length}/${declared.length} attachment(s) for ${path.basename(filePath)}; ${declared.length - attachments.length} could not be pulled.`);
+        console.error(`[OUTBOUND] (${bot.slug}) delivered text + ${attachments.length}/${declared.length} attachment(s) for ${path.basename(filePath)}; ${declared.length - attachments.length} rejected-by-policy or could-not-be-pulled.`);
       }
 
       console.log(`[-> Teams] (${bot.slug}) reply from ${displayName} -> conversation ${conversationId} (${chunks.length} chunk(s), ${attachments.length} attachment(s)).`);

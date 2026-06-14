@@ -89,8 +89,12 @@ export interface AMPAttachmentV1 {
   digest: string;
   /** HMAC-signed download URL; present only when scan_status is clean/basic_clean. */
   url: string;
-  /** Scan lifecycle: pending -> basic_clean (confirm) / rejected (confirm fail) / clean. */
-  scan_status: 'pending' | 'basic_clean' | 'clean' | 'rejected';
+  /**
+   * Scan lifecycle: pending -> basic_clean (confirm) / rejected (confirm fail) /
+   * clean. `suspicious` is a terminal non-routable verdict Maestro may emit (Watson
+   * F1) — NOT in {clean,basic_clean}, so the gateway treats it as undeliverable.
+   */
+  scan_status: 'pending' | 'basic_clean' | 'clean' | 'rejected' | 'suspicious';
   uploaded_at: string;
   expires_at: string;
 }
