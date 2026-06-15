@@ -31,6 +31,15 @@ export interface EnrichedSender {
   handle?: string;
   trustLevel?: string;
   role?: string;
+  /**
+   * Advisory, GATEWAY-AUTHORITATIVE trust GATE decision for this sender
+   * ('operator' bypasses the scanner; 'external' is wrapped). Distinct from
+   * `trustLevel` above: `trustLevel` is the raw user-directory grade
+   * ('full'/'none'); `trust` is the resolved per-(tenant,sender) gate verdict the
+   * gateway acted on. Maestro passthrough-STORES it; it does NOT re-gate on it.
+   * Multi-participant scopes (Teams channel/groupChat) carry one per message author.
+   */
+  trust?: 'operator' | 'external';
 }
 
 export interface EnrichedThread {
@@ -45,6 +54,19 @@ export interface EnrichedContext {
   thread: EnrichedThread;
   /** Up to 3 topic keywords; capped producer-side. */
   topicHints: string[];
+  /**
+   * Advisory conversation-scope descriptor (Teams channels/group chats, #12).
+   * Sibling to sender/thread; Maestro passthrough-stores it (memory still keys on
+   * the top-level `thread_id`, NOT on this). Omitted entirely for personal/1:1
+   * scope (that envelope is unchanged). `threadRootId` is omitted when the message
+   * IS the channel-thread root.
+   */
+  room?: {
+    scope: 'personal' | 'channel' | 'groupChat';
+    teamId?: string;
+    channelId?: string;
+    threadRootId?: string;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +150,13 @@ export interface AMPRouteRequest {
   subject: string;
   priority?: 'urgent' | 'high' | 'normal' | 'low';
   in_reply_to?: string | null;
+  /**
+   * Top-level conversation thread id. Maestro maps this onto `envelope.thread_id`
+   * (its memory-retrieval read path) — so a STABLE value per conversation/thread
+   * makes memory cohere across messages. Teams sets it to the channel/groupChat
+   * thread-root (#12); personal/1:1 omits it (unchanged — threads via in_reply_to).
+   */
+  thread_id?: string;
   payload: {
     type: string;
     message: string;

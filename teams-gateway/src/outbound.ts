@@ -342,7 +342,12 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       }
 
       const reference = entry.context.reference;
-      const conversationId = reference?.conversation?.id;
+      // #12: post the reply into the ORIGINATING thread. For channel/groupChat the
+      // store holds the stable thread-root id (replyConversationId) — replying to the
+      // raw reference.conversation.id of a thread-ROOT message would post a NEW
+      // top-level message instead of threading. Personal (and older snapshots without
+      // the field) fall back to reference.conversation.id = unchanged 1:1 behavior.
+      const conversationId = entry.context.replyConversationId ?? reference?.conversation?.id;
       if (!conversationId) {
         console.error(`[OUTBOUND] (${bot.slug}) stored reference for in_reply_to=${inReplyTo} has no conversation id — cannot deliver, leaving.`);
         return false;

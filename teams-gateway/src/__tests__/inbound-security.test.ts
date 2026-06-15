@@ -116,7 +116,10 @@ describe('Teams inbound dedupe and scope gate', () => {
     assert.equal(deps.threadStore.size(), 1);
   });
 
-  it('drops channel and groupChat activities before user resolution or AMP routing', async () => {
+  // #12 INVARIANT REVISION: the v1 "drop ALL non-personal" rule is replaced by
+  // "non-personal proceeds ONLY through the @mention gate". The drop must still
+  // happen BEFORE user resolution / routing when the bot is NOT mentioned.
+  it('drops channel and groupChat activities that do not @mention this bot, before resolution or routing', async () => {
     let resolveCalls = 0;
     const routed: AMPRouteRequest[] = [];
     installRouteFetch(routed);
@@ -130,12 +133,105 @@ describe('Teams inbound dedupe and scope gate', () => {
       },
     });
 
+    // mentionsBot omitted (falsy) — not addressed.
     assert.equal(await handleInbound(activity({ conversationType: 'channel' }), deps), 'dropped');
     assert.equal(await handleInbound(activity({ activityId: 'activity-2', conversationType: 'groupChat' }), deps), 'dropped');
 
     assert.equal(resolveCalls, 0);
     assert.equal(routed.length, 0);
     assert.equal(deps.threadStore.size(), 0);
+  });
+
+  it('drops an unsupported conversationType before resolution or routing', async () => {
+    let resolveCalls = 0;
+    const routed: AMPRouteRequest[] = [];
+    installRouteFetch(routed);
+    const deps = makeDeps({
+      userResolver: {
+        resolve: async () => {
+          resolveCalls += 1;
+          return user();
+        },
+        clearCache: () => undefined,
+      },
+    });
+
+    // Even WITH a mention, an unknown scope is dropped (never treated as a DM).
+    assert.equal(await handleInbound(activity({ conversationType: 'unknown', mentionsBot: true }), deps), 'dropped');
+    assert.equal(resolveCalls, 0);
+    assert.equal(routed.length, 0);
+  });
+
+  it('routes a channel message that @mentions this bot, with a stable thread_id, room, and per-sender trust', async () => {
+    const routed: AMPRouteRequest[] = [];
+    installRouteFetch(routed);
+    const deps = makeDeps();
+
+    const status = await handleInbound(activity({
+      conversationType: 'channel',
+      conversationId: '19:channel-abc@thread.tacv2',
+      activityId: 'root-act-1',
+      mentionsBot: true,
+      teamId: 'team-1',
+      channelId: '19:channel-abc@thread.tacv2',
+    }), deps);
+
+    assert.equal(status, 'routed');
+    assert.equal(routed.length, 1);
+    const req = routed[0];
+    // Top-level thread_id = synthesized stable root for a thread-ROOT message.
+    assert.equal(req?.thread_id, '19:channel-abc@thread.tacv2;messageid=root-act-1');
+    // Advisory room (a root message omits threadRootId per the locked contract).
+    assert.deepEqual(req?.payload.context?.room, {
+      scope: 'channel',
+      teamId: 'team-1',
+      channelId: '19:channel-abc@thread.tacv2',
+    });
+    // Per-sender gate decision surfaced (default test user resolves external).
+    assert.equal(req?.payload.context?.sender.trust, 'external');
+    // The reply target stored for outbound is the stable thread-root.
+    assert.equal(deps.threadStore.findByAmpMessageId('maestro', 'amp-1')?.context.replyConversationId,
+      '19:channel-abc@thread.tacv2;messageid=root-act-1');
+  });
+
+  it('collapses a channel thread root and its replies onto one stable thread_id', async () => {
+    const routed: AMPRouteRequest[] = [];
+    installRouteFetch(routed, () => routeResponse(`amp-${routed.length + 1}`));
+    const deps = makeDeps();
+
+    // Thread-root message (conversation.id has no ;messageid suffix).
+    await handleInbound(activity({
+      conversationType: 'channel',
+      conversationId: '19:ch@thread.tacv2',
+      activityId: 'root-1',
+      mentionsBot: true,
+    }), deps);
+    // A reply in that thread (conversation.id carries ;messageid=root-1).
+    await handleInbound(activity({
+      conversationType: 'channel',
+      conversationId: '19:ch@thread.tacv2;messageid=root-1',
+      activityId: 'reply-1',
+      mentionsBot: true,
+    }), deps);
+
+    assert.equal(routed.length, 2);
+    assert.equal(routed[0]?.thread_id, '19:ch@thread.tacv2;messageid=root-1');
+    assert.equal(routed[1]?.thread_id, '19:ch@thread.tacv2;messageid=root-1');
+    // Root omits threadRootId; the reply carries it.
+    assert.equal(Object.hasOwn(routed[0]?.payload.context?.room ?? {}, 'threadRootId'), false);
+    assert.equal(routed[1]?.payload.context?.room?.threadRootId, 'root-1');
+  });
+
+  it('keeps the personal-scope envelope byte-identical (no room, trust, or thread_id)', async () => {
+    const routed: AMPRouteRequest[] = [];
+    installRouteFetch(routed);
+    const deps = makeDeps();
+
+    await handleInbound(activity(), deps);
+    const req = routed[0];
+    assert.equal(Object.hasOwn(req ?? {}, 'thread_id'), false);
+    assert.equal(Object.hasOwn(req?.payload.context ?? {}, 'room'), false);
+    assert.equal(Object.hasOwn(req?.payload.context?.sender ?? {}, 'trust'), false);
   });
 });
 

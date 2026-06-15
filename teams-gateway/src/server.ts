@@ -83,6 +83,26 @@ function extractStrippedText(activity: {
   return activity.text ?? '';
 }
 
+/**
+ * True when THIS bot is @mentioned in the activity (#12). Teams encodes mentions as
+ * `entities[]` of `{ type:'mention', mentioned:{ id } }`; the bot is addressed when a
+ * mention's `mentioned.id` equals the activity recipient (this bot's) id. Typed
+ * structurally so this stays decoupled from the SDK's churn-prone activity type.
+ * Conservative: no recipient id or no mention entities => not mentioned (the gate
+ * then drops a non-personal message — fail-closed on addressing).
+ */
+function botWasMentioned(activity: {
+  entities?: unknown;
+  recipient?: { id?: string };
+}): boolean {
+  const recipientId = activity.recipient?.id;
+  if (!recipientId || !Array.isArray(activity.entities)) return false;
+  return activity.entities.some((e) => {
+    const ent = e as { type?: string; mentioned?: { id?: string } };
+    return ent?.type === 'mention' && ent.mentioned?.id === recipientId;
+  });
+}
+
 /** Teams file-send wrapper content type — carries the real download URL + name. */
 const TEAMS_FILE_DOWNLOAD_INFO = 'application/vnd.microsoft.teams.file.download.info';
 /** Per-attachment HTTP leg timeout (download header arrival + Maestro upload/confirm/status). */
@@ -263,6 +283,11 @@ async function buildBotApps(
         fromId: a.from?.id ?? '',
         fromName: a.from?.name ?? '',
         text: extractStrippedText(a),
+        // #12: addressing + channel/team context for the scope+mention gate and the
+        // advisory room descriptor. Personal scope ignores all three.
+        mentionsBot: botWasMentioned(a),
+        teamId: a.channelData?.team?.id,
+        channelId: a.channelData?.channel?.id,
         tenantId: a.channelData?.tenant?.id,
         serviceUrl: a.serviceUrl,
         reference: ctx.ref,

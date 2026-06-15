@@ -87,6 +87,72 @@ export function extractTopicHints(text: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Conversation scope + stable thread-root derivation (#12)
+// ---------------------------------------------------------------------------
+
+export type ConversationScope = 'personal' | 'channel' | 'groupChat';
+
+export interface ThreadIdentity {
+  scope: ConversationScope;
+  /**
+   * Stable per-thread id — the SAME value for the thread ROOT message and every
+   * reply in it. Used both as the top-level route `thread_id` (so Maestro memory
+   * coheres per-thread) AND as the outbound reply target (so a reply lands in the
+   * originating thread, not as a new top-level post).
+   */
+  stableThreadId: string;
+  /**
+   * Channel thread-root message id. Omitted when THIS message IS the root (per the
+   * locked contract: "omit for channel-root"), and for personal/groupChat (no
+   * sub-threading there).
+   */
+  threadRootId?: string;
+}
+
+const CHANNEL_THREAD_MARKER = ';messageid=';
+
+/**
+ * Classify a Teams `conversationType` and derive the stable thread-root identity.
+ *
+ * Teams channel conversation ids look like `19:<ch>@thread.tacv2` for a thread-ROOT
+ * message and `19:<ch>@thread.tacv2;messageid=<rootId>` for replies within that
+ * thread. We parse the `;messageid=` suffix and rebuild a canonical
+ * `<base>;messageid=<rootId>` so the root and all its replies collapse to ONE
+ * stable id (for the root we synthesize the suffix from its own activity id). A
+ * group chat has no sub-threading, so the whole chat is one stable thread.
+ *
+ * D2 (greenlit): the suffix parse is defensive (fallback = this activity's id); the
+ * exact live channel-ref shape is a deploy-time watch item, so this is unit-tested
+ * against mock refs and the derived id is logged for the live pass to eyeball.
+ *
+ * NOTE: only called for already-accepted scopes (the caller drops unknown
+ * `conversationType`s first), so the `personal` return is reached only for a true
+ * 1:1 — its `stableThreadId` is unused (personal omits the top-level `thread_id`).
+ */
+export function deriveThreadIdentity(
+  conversationType: string,
+  conversationId: string,
+  activityId: string,
+): ThreadIdentity {
+  if (conversationType === 'channel') {
+    const idx = conversationId.indexOf(CHANNEL_THREAD_MARKER);
+    const suffix = idx >= 0 ? conversationId.slice(idx + CHANNEL_THREAD_MARKER.length) : '';
+    const base = idx >= 0 ? conversationId.slice(0, idx) : conversationId;
+    if (suffix !== '') {
+      // Reply within an existing thread — root id is the parsed suffix.
+      return { scope: 'channel', stableThreadId: `${base}${CHANNEL_THREAD_MARKER}${suffix}`, threadRootId: suffix };
+    }
+    // Thread-ROOT message — synthesize the suffix from this activity's id; omit
+    // threadRootId so the root message carries no `room.threadRootId`.
+    return { scope: 'channel', stableThreadId: `${base}${CHANNEL_THREAD_MARKER}${activityId}` };
+  }
+  if (conversationType === 'groupChat') {
+    return { scope: 'groupChat', stableThreadId: conversationId };
+  }
+  return { scope: 'personal', stableThreadId: conversationId };
+}
+
+// ---------------------------------------------------------------------------
 // SDK-decoupled inbound DTO + per-bot dependencies
 // ---------------------------------------------------------------------------
 
@@ -107,6 +173,17 @@ export interface InboundActivity {
   fromName: string;
   /** Mention-stripped message text. */
   text: string;
+  /**
+   * True when THIS bot was @mentioned in the activity (#12). Computed SDK-side in
+   * `server.ts` from the mention entities against the bot's recipient id. Drives
+   * the channel/groupChat mention gate; ignored for personal (DMs are implicitly
+   * addressed). Absent/false = not mentioned.
+   */
+  mentionsBot?: boolean;
+  /** Teams team (group) id for a channel message (#12); absent for personal/groupChat. */
+  teamId?: string;
+  /** Teams channel id for a channel message (#12); absent for personal/groupChat. */
+  channelId?: string;
   tenantId?: string;
   serviceUrl?: string;
   /** Full conversation reference (`ctx.ref`) — drives outbound `continueConversation`. */
@@ -164,9 +241,23 @@ export async function handleInbound(
   const now = deps.now ?? Date.now;
   const log = (msg: string) => console.log(`[TEAMS] (${bot.slug}) ${msg}`);
 
-  // 1. Personal-scope gate (v1). Channel / groupChat enumerated in a later phase.
-  if (activity.conversationType !== 'personal') {
-    log(`dropping ${activity.conversationType} activity ${activity.activityId} — personal scope only (v1).`);
+  // 1. Scope gate (#12). Accept personal (1:1 DM), channel, and groupChat; drop any
+  //    other conversationType. (Replaces the v1 personal-only drop.)
+  const conversationType = activity.conversationType;
+  const isPersonal = conversationType === 'personal';
+  if (conversationType !== 'personal' && conversationType !== 'channel' && conversationType !== 'groupChat') {
+    log(`dropping unsupported conversationType '${conversationType}' activity ${activity.activityId}.`);
+    return 'dropped';
+  }
+
+  // 1b. Mention gate (#12). The NEW security invariant (replacing "drop all
+  //     non-personal"): a channel/groupChat message proceeds ONLY when THIS bot is
+  //     @mentioned — gated here, BEFORE dedupe / user-resolution / scan. A 1:1 DM is
+  //     implicitly addressed, so no mention is required there. From here on every
+  //     non-personal message has passed the mention gate and still flows through the
+  //     same tenant-scoped trust + scanner path below.
+  if (!isPersonal && !activity.mentionsBot) {
+    log(`dropping ${conversationType} activity ${activity.activityId} — this bot was not @mentioned.`);
     return 'dropped';
   }
 
@@ -205,12 +296,18 @@ export async function handleInbound(
     log(`trust=${trust.level} flags=${flags.length} (${trust.reason})`);
   }
 
-  // 6. Thread heuristics (personal scope): new if no recent thread or stale > 30 min.
+  // 6. Thread heuristics: new if no recent thread or stale > 30 min.
   const recent = deps.threadStore.findRecentByConversation(bot.slug, activity.conversationId);
   const isNewConversation = !recent || now() - recent.createdAt > CONVERSATION_TIMEOUT_MS;
 
+  // 6b. Stable thread-root identity (#12). For channel/groupChat this is the memory
+  //     key (top-level thread_id) AND the outbound reply target; personal omits it.
+  const identity = deriveThreadIdentity(conversationType, activity.conversationId, activity.activityId);
+
   // 7. Build the typed EnrichedContext envelope (locked contract; no `userId`,
-  //    `inReplyTo` omitted when absent, topicHints capped at 3).
+  //    `inReplyTo` omitted when absent, topicHints capped at 3). Channel/groupChat
+  //    additively carry advisory `room` + per-sender `trust`; the personal envelope
+  //    is byte-identical to v1 (D1 greenlit).
   const context: EnrichedContext = {
     sender: {
       platformUserId,
@@ -218,13 +315,26 @@ export async function handleInbound(
       displayName: resolvedUser?.displayName ?? displayName,
       handle: displayName,
       ...(resolvedUser && { trustLevel: resolvedUser.trustLevel, role: resolvedUser.role }),
+      // Advisory gate decision (operator|external), per-participant. Non-personal only.
+      ...(!isPersonal && { trust: trust.level }),
     },
     thread: {
-      threadId: activity.conversationId,
+      // Non-personal threads on the stable root id (cohere replies); personal keeps
+      // the 1:1 conversation id unchanged.
+      threadId: isPersonal ? activity.conversationId : identity.stableThreadId,
       isNewConversation,
       ...(recent && { inReplyTo: recent.ampMessageId }),
     },
     topicHints: extractTopicHints(activity.text),
+    // Advisory room descriptor — channel/groupChat only; personal omits it entirely.
+    ...(!isPersonal && {
+      room: {
+        scope: identity.scope,
+        ...(activity.teamId && { teamId: activity.teamId }),
+        ...(activity.channelId && { channelId: activity.channelId }),
+        ...(identity.threadRootId && { threadRootId: identity.threadRootId }),
+      },
+    }),
   };
 
   // 7.5 Ingest attachments (w3) BEFORE routing — the AMPAttachmentV1[] is cited in
@@ -270,6 +380,9 @@ export async function handleInbound(
     to: bot.defaultAgent,
     subject: `Teams message from ${displayName}`,
     priority: 'normal',
+    // Top-level thread_id (#12): the stable channel/groupChat thread-root, so Maestro
+    // memory coheres per-thread. Personal omits it (unchanged — threads via in_reply_to).
+    ...(!isPersonal && { thread_id: identity.stableThreadId }),
     payload: { type: 'request', message, context, ...(attachments && { attachments }) },
   };
 
@@ -315,10 +428,16 @@ export async function handleInbound(
       reference: activity.reference,
       rootActivityId: activity.activityId,
       tenantId: activity.tenantId ?? '',
+      // #12: where outbound posts the reply so it threads into the originating
+      // conversation. Channel/groupChat -> the stable thread-root; personal omits it
+      // (outbound falls back to reference.conversation.id = unchanged 1:1 behavior).
+      ...(!isPersonal && { replyConversationId: identity.stableThreadId }),
     },
     createdAt: now(),
   });
 
-  log(`routed activity ${activity.activityId} -> ${bot.defaultAgent} (amp ${result.id}, trust=${trust.level}, new=${isNewConversation}).`);
+  // Log the derived stableThreadId for non-personal (D2: deploy-time live pass eyeballs it).
+  const threadLog = isPersonal ? '' : `, scope=${identity.scope}, thread=${identity.stableThreadId}`;
+  log(`routed activity ${activity.activityId} -> ${bot.defaultAgent} (amp ${result.id}, trust=${trust.level}, new=${isNewConversation}${threadLog}).`);
   return 'routed';
 }
