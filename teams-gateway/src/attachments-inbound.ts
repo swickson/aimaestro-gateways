@@ -102,6 +102,10 @@ function isRoutableScanStatus(status: AMPAttachmentV1['scan_status']): boolean {
   return status === 'clean' || status === 'basic_clean';
 }
 
+function normalizeDescriptorDigest(digest: string): string {
+  return digest.startsWith('sha256:') ? digest : `sha256:${digest}`;
+}
+
 /**
  * Ingest all attachments on one inbound Teams message. Enforces the gateway count
  * cap (extras dropped + logged), per-attachment deny-list + size cap (fail-fast),
@@ -245,7 +249,7 @@ async function uploadAttachment(att: RawInboundAttachment, bytes: Uint8Array, de
     filename: status.filename,
     content_type: status.content_type,
     size: status.size,
-    digest: status.digest,
+    digest: normalizeDescriptorDigest(status.digest),
     url: status.url,
     scan_status: status.scan_status,
     uploaded_at: status.uploaded_at,
