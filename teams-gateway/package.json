@@ -13,6 +13,7 @@
   "dependencies": {
     "@microsoft/teams.api": "2.0.12",
     "@microsoft/teams.apps": "2.0.12",
+    "@microsoft/teams.cards": "2.0.12",
     "dotenv": "^16.4.7",
     "express": "^4.21.2"
   },

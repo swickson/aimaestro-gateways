@@ -34,7 +34,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AMPAttachmentV1, AMPMessage, AttachmentPolicy } from './types.js';
 import type { ThreadStore } from './thread-store.js';
-import { formatReply } from './format.js';
+import { formatReply, formatStatusSummaryFallback, type StatusSummary } from './format.js';
 
 /** Per-attachment HTTP pull timeout (signed-url GET). */
 const ATTACHMENT_PULL_TIMEOUT_MS = 20_000;
@@ -73,7 +73,13 @@ export interface OutboundBot {
    * Post a chunk proactively under THIS bot, into `conversationId`. `attachments`
    * (w3) ride a final attachment-carrying activity; empty/omitted = text-only.
    */
-  send(conversationId: string, text: string, markdown: boolean, attachments?: OutboundAttachment[]): Promise<void>;
+  send(
+    conversationId: string,
+    text: string,
+    markdown: boolean,
+    attachments?: OutboundAttachment[],
+    card?: Record<string, unknown>
+  ): Promise<void>;
 }
 
 export interface OutboundDeps {
@@ -90,6 +96,8 @@ export interface OutboundDeps {
    */
   policy: AttachmentPolicy;
   debug: boolean;
+  /** Optional card builder function injected at the SDK boundary. */
+  buildCard?: (type: string, messageText: string) => Record<string, unknown> | null;
 }
 
 /**
@@ -363,9 +371,33 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       const responseText =
         typeof rawMessage === 'string' ? rawMessage : rawMessage ? JSON.stringify(rawMessage) : '';
 
+      // Build card if type is opt-in
+      let cardObject: Record<string, unknown> | undefined;
+      let textToSend = responseText;
+
+      if (msg.payload?.render && deps.buildCard) {
+        try {
+          const card = deps.buildCard(msg.payload.render, responseText);
+          if (card) {
+            cardObject = card;
+            // Generate structured markdown fallback
+            if (msg.payload.render === 'status_summary') {
+              try {
+                const parsed = JSON.parse(responseText) as StatusSummary;
+                textToSend = formatStatusSummaryFallback(parsed);
+              } catch {
+                textToSend = responseText;
+              }
+            }
+          }
+        } catch (err) {
+          console.error(`[OUTBOUND] (${bot.slug}) card builder threw error:`, (err as Error).message);
+        }
+      }
+
       const { chunks, markdown } = formatReply({
         displayName,
-        message: responseText,
+        message: textToSend,
         markdown: deps.markdownDefault,
       });
 
@@ -379,9 +411,9 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
           : { pulled: [], validationDrops: 0, pullFailures: 0 };
       const attachments = pull.pulled;
 
-      // The outbound.ts:139 fix: "nothing to post" is now text AND attachments empty.
-      // An attachment-only reply (empty text + attachments) must DELIVER, not delete.
-      if (chunks.length === 0 && declared.length === 0) {
+      // The outbound.ts:139 fix: "nothing to post" is now text/card AND attachments empty.
+      // An attachment-only reply (empty text/card + attachments) must DELIVER, not delete.
+      if (chunks.length === 0 && !cardObject && declared.length === 0) {
         console.log(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} is an empty reply — nothing to post, deleting.`);
         fs.unlinkSync(filePath);
         warnedUndeliverable.delete(filePath);
@@ -393,7 +425,7 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       //     never drop legitimate agent data;
       //   - but if EVERY descriptor failed policy validation (malformed/hostile) with
       //     no transient failure, retry is pointless → DROP it (delete), don't spin.
-      if (chunks.length === 0 && attachments.length === 0) {
+      if (chunks.length === 0 && !cardObject && attachments.length === 0) {
         if (pull.pullFailures > 0) {
           if (!warnedUndeliverable.has(filePath)) {
             console.error(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} is attachment-only but no attachment could be pulled — leaving for retry.`);
@@ -407,9 +439,28 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
         return true;
       }
 
-      for (const chunk of chunks) {
-        await bot.send(conversationId, chunk, markdown);
+      let sentCard = false;
+      if (cardObject) {
+        try {
+          // Send card proactively
+          await bot.send(conversationId, '', markdown, undefined, cardObject);
+          sentCard = true;
+          console.log(`[-> Teams] (${bot.slug}) reply from ${displayName} -> conversation ${conversationId} (Adaptive Card).`);
+        } catch (err) {
+          console.error(`[OUTBOUND] (${bot.slug}) card delivery failed: ${(err as Error).message} — falling back to markdown.`);
+          // fall through to text fallback
+        }
       }
+
+      if (!sentCard) {
+        for (const chunk of chunks) {
+          await bot.send(conversationId, chunk, markdown);
+        }
+        if (chunks.length > 0) {
+          console.log(`[-> Teams] (${bot.slug}) reply from ${displayName} -> conversation ${conversationId} (${chunks.length} chunk(s)${cardObject ? ', card fallback' : ''}).`);
+        }
+      }
+
       // Attachments ride a final attachment-carrying activity (separate bubble; the
       // outbound App.send attachment shape is the live-Azure watch item).
       if (attachments.length > 0) {
@@ -419,10 +470,8 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       // Text delivered but some/all attachments dropped (policy-rejected or pull-failed):
       // never block text — log loud (the lost attachment is accepted per item-8 has-text).
       if (declared.length > attachments.length) {
-        console.error(`[OUTBOUND] (${bot.slug}) delivered text + ${attachments.length}/${declared.length} attachment(s) for ${path.basename(filePath)}; ${declared.length - attachments.length} rejected-by-policy or could-not-be-pulled.`);
+        console.error(`[OUTBOUND] (${bot.slug}) delivered text/card + ${attachments.length}/${declared.length} attachment(s) for ${path.basename(filePath)}; ${declared.length - attachments.length} rejected-by-policy or could-not-be-pulled.`);
       }
-
-      console.log(`[-> Teams] (${bot.slug}) reply from ${displayName} -> conversation ${conversationId} (${chunks.length} chunk(s), ${attachments.length} attachment(s)).`);
 
       fs.unlinkSync(filePath);
       warnedUndeliverable.delete(filePath);
