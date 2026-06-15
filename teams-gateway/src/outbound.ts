@@ -376,17 +376,33 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       const responseText =
         typeof rawMessage === 'string' ? rawMessage : rawMessage ? JSON.stringify(rawMessage) : '';
 
-      // Build card if type is opt-in
+      // Build card if type is opt-in.
+      //
+      // w5: the render selector is read from payload.render (top-level, PRIMARY)
+      // with a FALLBACK to payload.context.render. amp-send --context
+      // {"render":"status_summary"} lands the selector in payload.context, so the
+      // fallback lets agents fire a card through EXISTING tooling — without it the
+      // merged card feature has no agent-facing trigger (no sending tool sets
+      // top-level payload.render). The card DATA still rides in the message body
+      // (responseText), unchanged. payload.context is the LOCKED EnrichedContext
+      // contract (no `render` field) — read the fallback off an opaque view rather
+      // than widening that contract; narrow to string since buildCard wants a
+      // string selector. (A dedicated amp-send --render flag is a separate
+      // KAI/plugin follow-up, not this lane.)
       let cardObject: Record<string, unknown> | undefined;
       let textToSend = responseText;
 
-      if (msg.payload?.render && deps.buildCard) {
+      const contextRender = (msg.payload?.context as { render?: unknown } | null | undefined)?.render;
+      const renderSel =
+        msg.payload?.render ?? (typeof contextRender === 'string' ? contextRender : undefined);
+
+      if (renderSel && deps.buildCard) {
         try {
-          const card = deps.buildCard(msg.payload.render, responseText);
+          const card = deps.buildCard(renderSel, responseText);
           if (card) {
             cardObject = card;
             // Generate structured markdown fallback
-            if (msg.payload.render === 'status_summary') {
+            if (renderSel === 'status_summary') {
               try {
                 const parsed = JSON.parse(responseText) as StatusSummary;
                 textToSend = formatStatusSummaryFallback(parsed);
