@@ -42,6 +42,7 @@ import { createUserResolver, type UserResolver } from './user-resolver.js';
 import { startOutboundPoller, type OutboundBot } from './outbound.js';
 import { loadMeshOrigins } from './mesh-hosts.js';
 import { restoreThreadStore, saveThreadStore, startSnapshotTimer } from './thread-persistence.js';
+import { buildCard } from './card-builder.js';
 import type { GatewayConfig } from './types.js';
 
 const GATEWAY_NAME = 'teams-gateway';
@@ -314,25 +315,36 @@ function buildOutboundBots(
       maestroUrl: config.amp.maestroUrl,
       allowedOrigins,
       configuredServiceUrl: app.api.serviceUrl,
-      send: async (conversationId, text, markdown, attachments) => {
+      send: async (conversationId, text, markdown, attachments, card) => {
         await app.send(conversationId, {
           type: 'message',
-          text,
-          // markdown is the Teams default; only set the field to fall back to plain.
-          ...(markdown ? {} : { textFormat: 'plain' }),
-          // w3: inline each attachment as a base64 data URI. Small images render
-          // inline; larger files surface as a download. The exact Teams attachment
-          // shape (hosted vs file-consent vs Graph) is a LIVE-AZURE WATCH ITEM —
-          // verified at deploy, same class as the Fork-O1 App.send unknown.
-          ...(attachments?.length
+          ...(card
             ? {
-                attachments: attachments.map((a) => ({
-                  contentType: a.contentType || 'application/octet-stream',
-                  contentUrl: `data:${a.contentType || 'application/octet-stream'};base64,${Buffer.from(a.bytes).toString('base64')}`,
-                  name: a.filename,
-                })),
+                attachments: [
+                  {
+                    contentType: 'application/vnd.microsoft.card.adaptive',
+                    content: card,
+                  },
+                ],
               }
-            : {}),
+            : {
+                text,
+                // markdown is the Teams default; only set the field to fall back to plain.
+                ...(markdown ? {} : { textFormat: 'plain' }),
+                // w3: inline each attachment as a base64 data URI. Small images render
+                // inline; larger files surface as a download. The exact Teams attachment
+                // shape (hosted vs file-consent vs Graph) is a LIVE-AZURE WATCH ITEM —
+                // verified at deploy, same class as the Fork-O1 App.send unknown.
+                ...(attachments?.length
+                  ? {
+                      attachments: attachments.map((a) => ({
+                        contentType: a.contentType || 'application/octet-stream',
+                        contentUrl: `data:${a.contentType || 'application/octet-stream'};base64,${Buffer.from(a.bytes).toString('base64')}`,
+                        name: a.filename,
+                      })),
+                    }
+                  : {}),
+              }),
         });
       },
     });
@@ -514,6 +526,7 @@ async function main(): Promise<void> {
       markdownDefault: config.markdownDefault,
       policy: config.attachments,
       debug: config.debug,
+      buildCard,
     });
     // Periodic crash-safety snapshot; the graceful shutdown path saves once more.
     stopSnapshot = startSnapshotTimer(threadStore, config.threadStorePath, config.snapshotIntervalMs);
