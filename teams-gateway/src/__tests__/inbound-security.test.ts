@@ -266,6 +266,44 @@ describe('Teams inbound dedupe and scope gate', () => {
     assert.equal(routed[1]?.payload.context?.room?.threadRootId, 'root-1');
   });
 
+  // #20 BLOCKER (Columbo): channel-root recency must NOT cross-link. Two SEPARATE
+  // root posts in the SAME channel share the RAW conversation.id (a thread-root has
+  // no `;messageid=` suffix). Keying recency on that raw id made root B inherit root
+  // A's inReplyTo + isNewConversation=false — bleeding context across unrelated
+  // channel threads. Recency now keys on the distinct stableThreadId, so the SECOND
+  // root is a fresh conversation with no inReplyTo. Do not delete: guards the bleed closed.
+  it('does not cross-link two separate root posts in the same channel (#20)', async () => {
+    const routed: AMPRouteRequest[] = [];
+    installRouteFetch(routed, () => routeResponse(`amp-${routed.length + 1}`));
+    const deps = makeDeps();
+
+    // Root post A and root post B: SAME channel conversation.id (no ;messageid suffix),
+    // DISTINCT activity ids — two independent top-level threads, not a reply.
+    await handleInbound(activity({
+      conversationType: 'channel',
+      conversationId: '19:ch@thread.tacv2',
+      activityId: 'root-A',
+      mentionsBot: true,
+    }), deps);
+    await handleInbound(activity({
+      conversationType: 'channel',
+      conversationId: '19:ch@thread.tacv2',
+      activityId: 'root-B',
+      mentionsBot: true,
+    }), deps);
+
+    assert.equal(routed.length, 2);
+    // Distinct stable thread ids — the two roots are isolated threads.
+    assert.equal(routed[0]?.thread_id, '19:ch@thread.tacv2;messageid=root-A');
+    assert.equal(routed[1]?.thread_id, '19:ch@thread.tacv2;messageid=root-B');
+    // THE FIX: root B is a NEW conversation and carries NO inReplyTo (no bleed from A).
+    assert.equal(routed[1]?.payload.context?.thread.isNewConversation, true);
+    assert.equal(Object.hasOwn(routed[1]?.payload.context?.thread ?? {}, 'inReplyTo'), false);
+    // Root A is likewise a fresh root (sanity: it has no prior to link to either).
+    assert.equal(routed[0]?.payload.context?.thread.isNewConversation, true);
+    assert.equal(Object.hasOwn(routed[0]?.payload.context?.thread ?? {}, 'inReplyTo'), false);
+  });
+
   it('keeps the personal-scope envelope byte-identical (no room, trust, or thread_id)', async () => {
     const routed: AMPRouteRequest[] = [];
     installRouteFetch(routed);

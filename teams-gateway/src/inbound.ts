@@ -301,13 +301,22 @@ export async function handleInbound(
     log(`trust=${trust.level} flags=${flags.length} (${trust.reason})`);
   }
 
-  // 6. Thread heuristics: new if no recent thread or stale > 30 min.
-  const recent = deps.threadStore.findRecentByConversation(bot.slug, activity.conversationId);
-  const isNewConversation = !recent || now() - recent.createdAt > CONVERSATION_TIMEOUT_MS;
-
-  // 6b. Stable thread-root identity (#12). For channel/groupChat this is the memory
-  //     key (top-level thread_id) AND the outbound reply target; personal omits it.
+  // 6. Stable thread-root identity (#12). For channel/groupChat this is the memory
+  //    key (top-level thread_id) AND the outbound reply target; personal omits it.
+  //    Derived BEFORE the recency lookup because recency keys on it (Columbo #20
+  //    BLOCKER): two SEPARATE root posts in one channel share the RAW conversation.id
+  //    (a thread-root carries no `;messageid=` suffix), so keying recency on the raw
+  //    id cross-links them — root B would inherit root A's inReplyTo and
+  //    isNewConversation=false. The stableThreadId is distinct per root (synthesized
+  //    from each root's own activity id), so it isolates the threads correctly.
   const identity = deriveThreadIdentity(conversationType, activity.conversationId, activity.activityId);
+  // Recency key: non-personal keys on the stable thread-root id (NOT the raw
+  // conversation.id); personal is byte-identical to v1 (the raw 1:1 conversation id).
+  const recencyKey = isPersonal ? activity.conversationId : identity.stableThreadId;
+
+  // 6b. Thread heuristics: new if no recent thread or stale > 30 min.
+  const recent = deps.threadStore.findRecentByConversation(bot.slug, recencyKey);
+  const isNewConversation = !recent || now() - recent.createdAt > CONVERSATION_TIMEOUT_MS;
 
   // 7. Build the typed EnrichedContext envelope (locked contract; no `userId`,
   //    `inReplyTo` omitted when absent, topicHints capped at 3). Channel/groupChat
@@ -423,7 +432,11 @@ export async function handleInbound(
   //     the agent's reply can be posted back under this bot (consumed in Phase 3).
   deps.threadStore.record({
     botSlug: bot.slug,
-    conversationId: activity.conversationId,
+    // Recency-index key (#12 / Columbo #20): non-personal records under the stable
+    // thread-root id so two root posts in one channel never share a recency entry;
+    // personal stays byte-identical (the raw 1:1 conversation id). Both the lookup
+    // (step 6b) and this write MUST agree on the key, so both use `recencyKey`.
+    conversationId: recencyKey,
     ampMessageId: result.id,
     // TARGET user for a future proactive DM — the same canonical id used as the
     // directory key above (aadObjectId, BF account-id fallback), so a Maestro DM's
