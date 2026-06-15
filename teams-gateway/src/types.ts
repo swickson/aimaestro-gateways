@@ -113,6 +113,8 @@ export interface DmRequest {
   platformUserId: string;
   /** Caller-pinned sending bot. Omit to use the user's most-recently-seen bot. */
   botSlug?: string;
+  /** Azure AD tenant for cold-start 1:1 conversation creation. */
+  tenantId?: string;
   /** The message text to deliver. */
   message: string;
   /** Optional subject, prepended as a bold leading line before chunking. */
@@ -140,6 +142,8 @@ export interface GatewayConfig {
   };
   /** Render outbound replies as markdown (default) or plain text (TEAMS_MARKDOWN=0). */
   markdownDefault: boolean;
+  /** Feature flag for Bot Connector createConversation cold-start DMs. */
+  dmColdStartEnabled: boolean;
   /** User-directory resolver cache TTL (CACHE_USER_TTL_MS; default 5 min). */
   cacheUserTtlMs: number;
   /** Gateway-side attachment caps + deny policy (w3). */
