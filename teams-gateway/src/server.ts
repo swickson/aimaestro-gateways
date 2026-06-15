@@ -27,6 +27,7 @@
 import express from 'express';
 import type { Server } from 'node:http';
 import { App, ExpressAdapter } from '@microsoft/teams.apps';
+import type { Account, ConversationReference } from '@microsoft/teams.api';
 import { createAuthMiddleware } from '@aimaestro/common/auth.js';
 import { bootstrapGateway, type BotRegistration } from '@aimaestro/common/amp-bootstrap.js';
 import { Cache } from '@aimaestro/common/cache.js';
@@ -473,6 +474,7 @@ async function main(): Promise<void> {
       threadStore,
       knownBots: new Set(apps.keys()),
       markdownDefault: config.markdownDefault,
+      coldStartEnabled: config.dmColdStartEnabled,
       adminToken: config.adminToken,
       sendChunk: async (botSlug, conversationId, text, markdown) => {
         const app = apps.get(botSlug);
@@ -482,6 +484,38 @@ async function main(): Promise<void> {
           text,
           ...(markdown ? {} : { textFormat: 'plain' }),
         });
+      },
+      createColdStartConversation: async ({ botSlug, tenantId, aadObjectId, text, markdown }) => {
+        const app = apps.get(botSlug);
+        const bot = config.bots.find((b) => b.slug === botSlug);
+        if (!app || !bot) throw new Error(`no App for bot '${botSlug}'`);
+
+        const user: Account = { id: aadObjectId, aadObjectId, name: aadObjectId, role: 'user' };
+        const botAccount: Account = { id: bot.appId, name: bot.slug, role: 'bot' };
+        const created = await app.api.conversations.create({
+          isGroup: false,
+          tenantId,
+          bot: botAccount,
+          members: [user],
+          activity: {
+            type: 'message',
+            text,
+            ...(markdown ? {} : { textFormat: 'plain' }),
+          },
+        });
+        const reference: ConversationReference = {
+          serviceUrl: created.serviceUrl,
+          channelId: 'msteams',
+          conversation: { id: created.id, conversationType: 'personal', tenantId, isGroup: false },
+          bot: botAccount,
+          user,
+          ...(created.activityId && { activityId: created.activityId }),
+        };
+        return {
+          conversationId: created.id,
+          reference,
+          rootActivityId: created.activityId || `dm:${botSlug}:${aadObjectId}`,
+        };
       },
     }),
   );
