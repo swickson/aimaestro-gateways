@@ -99,14 +99,14 @@ describe('Teams Adaptive Cards Outbound', () => {
       assert.equal(card.type, 'AdaptiveCard');
       assert.equal(card.version, '1.5');
       assert.ok(Array.isArray(card.body));
-      
+
       const body = card.body as Array<Record<string, unknown>>;
       assert.equal(body[0].text, 'System Diagnostics');
       assert.equal(body[1].text, 'Status: WARNING');
       assert.equal(body[1].color, 'Warning');
       assert.equal(body[2].text, 'Completed with warnings');
       assert.equal(body[3].type, 'FactSet');
-      
+
       const factSet = body[3] as { facts: Array<{ title: string; value: string }> };
       assert.equal(factSet.facts[0].title, 'CPU');
       assert.equal(factSet.facts[0].value, '98%');
