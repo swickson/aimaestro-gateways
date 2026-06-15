@@ -188,6 +188,24 @@ describe('Teams gateway config fail-closed behavior', () => {
       ]);
     });
   });
+
+  it('keeps DM cold-start disabled by default and enables only on an explicit truthy flag', () => {
+    withEnv({
+      ADMIN_TOKEN: 'admin-secret',
+      TEAMS_BOTS: botsJson(),
+      TEAMS_DM_COLD_START: undefined,
+    }, () => {
+      assert.equal(loadConfig().dmColdStartEnabled, false);
+    });
+
+    withEnv({
+      ADMIN_TOKEN: 'admin-secret',
+      TEAMS_BOTS: botsJson(),
+      TEAMS_DM_COLD_START: '1',
+    }, () => {
+      assert.equal(loadConfig().dmColdStartEnabled, true);
+    });
+  });
 });
 
 describe('Teams gateway skeleton HTTP boundary', () => {

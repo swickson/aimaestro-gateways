@@ -138,6 +138,7 @@ export function loadConfig(): GatewayConfig {
     },
     // Markdown is the default render; TEAMS_MARKDOWN=0/false flips to plain text.
     markdownDefault: process.env.TEAMS_MARKDOWN === undefined ? true : isTruthy(process.env.TEAMS_MARKDOWN),
+    dmColdStartEnabled: isTruthy(process.env.TEAMS_DM_COLD_START),
     attachments: loadAttachmentPolicy(),
     cacheUserTtlMs: parsePositiveInt(process.env.CACHE_USER_TTL_MS, DEFAULT_CACHE_USER_TTL_MS, 'CACHE_USER_TTL_MS'),
     threadStorePath,
