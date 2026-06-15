@@ -144,4 +144,3 @@ export function formatStatusSummaryFallback(data: StatusSummary): string {
 
   return markdown.trim();
 }
-
