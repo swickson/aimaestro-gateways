@@ -36,7 +36,7 @@ import { toBotConfigs } from './bot-registry.js';
 import { handleInbound, type InboundActivity, type InboundDeps } from './inbound.js';
 import type { RawInboundAttachment } from './attachments-inbound.js';
 import { buildAttachmentDownloader, type ConnectorTokenGetter } from './attachment-download.js';
-import { rejectMismatchedRecipient } from './recipient-binding.js';
+import { botWasMentioned, rejectMismatchedRecipient } from './recipient-binding.js';
 import { createThreadStore, type ThreadStore } from './thread-store.js';
 import { createDmRouter } from './dm.js';
 import { createUserResolver, type UserResolver } from './user-resolver.js';
@@ -265,6 +265,11 @@ async function buildBotApps(
         fromId: a.from?.id ?? '',
         fromName: a.from?.name ?? '',
         text: extractStrippedText(a),
+        // #12: addressing + channel/team context for the scope+mention gate and the
+        // advisory room descriptor. Personal scope ignores all three.
+        mentionsBot: botWasMentioned(a),
+        teamId: a.channelData?.team?.id,
+        channelId: a.channelData?.channel?.id,
         tenantId: a.channelData?.tenant?.id,
         serviceUrl: a.serviceUrl,
         reference: ctx.ref,
