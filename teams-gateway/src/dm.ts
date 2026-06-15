@@ -5,8 +5,11 @@
  * user who has NO open reply thread (`in_reply_to` is absent). v1 is
  * CAPTURE-ON-FIRST-CONTACT: we can only reach a user the gateway has already seen
  * inbound (their `ConversationReference` is in the thread-store, indexed by user).
- * Cold-start `createConversation` (never-contacted user) is v2 — OUT OF SCOPE; an
- * unseen user is a clean 409, not an error.
+ * Cold-start `createConversation` is feature-flagged OFF by default. When enabled,
+ * it only works for directory-known users where Maestro supplies the tenantId +
+ * botSlug it learned from prior inbound contact with some Teams bot. A truly
+ * never-seen user is still unresolvable — no Graph lookup or operator-supplied
+ * identity path lives here.
  *
  * SEND-BOT RESOLUTION (contract, locked with Watson): `body.botSlug ?? by-user
  * last-seen bot ?? 409`. The caller may pin a bot; otherwise the most-recently-
@@ -24,9 +27,25 @@
  */
 
 import express, { type Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import { createAuthMiddleware } from '@aimaestro/common/auth.js';
 import { chunkText, TEAMS_MAX_LENGTH } from './format.js';
 import type { ThreadStore } from './thread-store.js';
+import type { ThreadContext } from './types.js';
+
+export interface CreateColdStartConversationInput {
+  botSlug: string;
+  tenantId: string;
+  aadObjectId: string;
+  text: string;
+  markdown: boolean;
+}
+
+export interface CreateColdStartConversationResult {
+  conversationId: string;
+  reference: ThreadContext['reference'];
+  rootActivityId: string;
+}
 
 export interface DmDeps {
   threadStore: ThreadStore;
@@ -34,6 +53,13 @@ export interface DmDeps {
   knownBots: Set<string>;
   /** Post one chunk under `botSlug` into `conversationId` (bound to that bot's App.send). */
   sendChunk(botSlug: string, conversationId: string, text: string, markdown: boolean): Promise<void>;
+  /**
+   * Create a personal 1:1 conversation and send the FIRST chunk as the creation
+   * activity. Bound in server.ts to the per-bot SDK App; mocked in unit tests.
+   */
+  createColdStartConversation?: (input: CreateColdStartConversationInput) => Promise<CreateColdStartConversationResult>;
+  /** Feature flag: default false preserves the no_prior_contact 409 contract. */
+  coldStartEnabled: boolean;
   /** Render markdown (default) vs plain text. */
   markdownDefault: boolean;
 }
@@ -45,6 +71,35 @@ export interface DmResult {
 
 function badRequest(detail: string): DmResult {
   return { status: 400, json: { error: 'bad_request', detail } };
+}
+
+function coldStartError(err: unknown): DmResult {
+  const e = err as {
+    status?: unknown;
+    statusCode?: unknown;
+    code?: unknown;
+    response?: { status?: unknown };
+  };
+  const status =
+    typeof e.status === 'number'
+      ? e.status
+      : typeof e.statusCode === 'number'
+        ? e.statusCode
+        : typeof e.response?.status === 'number'
+          ? e.response.status
+          : undefined;
+  const code = typeof e.code === 'string' ? e.code : '';
+
+  if (status === 401 || status === 403) {
+    return { status: 409, json: { error: 'undeliverable', reason: 'bot_not_installed_or_forbidden' } };
+  }
+  if (status === 404) {
+    return { status: 409, json: { error: 'undeliverable', reason: 'user_or_tenant_not_found' } };
+  }
+  if (status === 400 || code === 'wrong_tenant') {
+    return { status: 409, json: { error: 'undeliverable', reason: 'wrong_tenant_or_unreachable' } };
+  }
+  return { status: 502, json: { error: 'undeliverable', reason: 'cold_start_failed' } };
 }
 
 /**
@@ -62,6 +117,7 @@ export async function deliverDm(deps: DmDeps, body: unknown): Promise<DmResult> 
   const platformUserId = typeof b.platformUserId === 'string' ? b.platformUserId.trim() : '';
   const message = typeof b.message === 'string' ? b.message : '';
   const subject = typeof b.subject === 'string' ? b.subject : undefined;
+  const tenantId = typeof b.tenantId === 'string' ? b.tenantId.trim() : '';
 
   // botSlug is optional, but if present it must be a non-empty string.
   let botSlug: string | undefined;
@@ -87,14 +143,64 @@ export async function deliverDm(deps: DmDeps, body: unknown): Promise<DmResult> 
   }
 
   if (!entry) {
-    console.log(
-      `[TEAMS] /api/gateway/dm undeliverable — no prior contact for platformUserId=${platformUserId}` +
-        `${botSlug ? ` bot=${botSlug}` : ''} (cold-start conversation = v2, out of scope).`,
-    );
-    return {
-      status: 409,
-      json: { error: 'undeliverable', reason: 'no_prior_contact', note: 'cold-start conversation creation is v2 (out of scope)' },
-    };
+    if (!deps.coldStartEnabled) {
+      console.log(
+        `[TEAMS] /api/gateway/dm undeliverable — no prior contact for platformUserId=${platformUserId}` +
+          `${botSlug ? ` bot=${botSlug}` : ''} (cold-start disabled).`,
+      );
+      return {
+        status: 409,
+        json: { error: 'undeliverable', reason: 'no_prior_contact', note: 'cold-start conversation creation is disabled' },
+      };
+    }
+    if (!botSlug) {
+      console.log(`[TEAMS] /api/gateway/dm undeliverable — no prior contact and no botSlug for platformUserId=${platformUserId}.`);
+      return { status: 409, json: { error: 'undeliverable', reason: 'no_send_bot' } };
+    }
+    if (!tenantId) {
+      return badRequest('tenantId is required for cold-start DM delivery');
+    }
+    if (!deps.createColdStartConversation) {
+      console.error('[TEAMS] /api/gateway/dm cold-start enabled but no createConversation dependency is configured.');
+      return { status: 502, json: { error: 'undeliverable', reason: 'cold_start_unavailable' } };
+    }
+
+    const prefix = subject ? (deps.markdownDefault ? `**${subject}**\n\n` : `${subject}\n\n`) : '';
+    const chunks = chunkText(prefix + message, TEAMS_MAX_LENGTH);
+    try {
+      const created = await deps.createColdStartConversation({
+        botSlug,
+        tenantId,
+        aadObjectId: platformUserId,
+        text: chunks[0] ?? '',
+        markdown: deps.markdownDefault,
+      });
+      const createdAt = Date.now();
+      deps.threadStore.record({
+        botSlug,
+        conversationId: created.conversationId,
+        ampMessageId: `dm:${botSlug}:${platformUserId}:${randomUUID()}`,
+        aadObjectId: platformUserId,
+        context: {
+          reference: created.reference,
+          rootActivityId: created.rootActivityId,
+          tenantId,
+        },
+        createdAt,
+      });
+      for (const chunk of chunks.slice(1)) {
+        await deps.sendChunk(botSlug, created.conversationId, chunk, deps.markdownDefault);
+      }
+      console.log(`[TEAMS] /api/gateway/dm cold-start delivered to ${platformUserId} via ${botSlug} (${chunks.length} chunk(s)).`);
+      return { status: 200, json: { delivered: true, botSlug, chunks: chunks.length, coldStart: true } };
+    } catch (err) {
+      const mapped = coldStartError(err);
+      console.error(
+        `[TEAMS] /api/gateway/dm cold-start failed for platformUserId=${platformUserId} bot=${botSlug} ` +
+          `tenant=${tenantId}: ${(err as Error).message}`,
+      );
+      return mapped;
+    }
   }
 
   const sendBot = entry.botSlug;

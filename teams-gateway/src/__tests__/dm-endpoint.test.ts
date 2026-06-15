@@ -42,14 +42,29 @@ interface Sent {
   markdown: boolean;
 }
 
-function deps(store: ThreadStore, sent: Sent[], markdownDefault = true): DmDeps {
+interface Created {
+  botSlug: string;
+  tenantId: string;
+  aadObjectId: string;
+  text: string;
+  markdown: boolean;
+}
+
+function deps(
+  store: ThreadStore,
+  sent: Sent[],
+  markdownDefault = true,
+  overrides: Partial<DmDeps> = {},
+): DmDeps {
   return {
     threadStore: store,
     knownBots: new Set(['maestro', 'echo']),
+    coldStartEnabled: false,
     markdownDefault,
     sendChunk: async (botSlug, conversationId, text, markdown) => {
       sent.push({ botSlug, conversationId, text, markdown });
     },
+    ...overrides,
   };
 }
 
@@ -78,11 +93,130 @@ describe('deliverDm (proactive DM core)', () => {
     assert.equal(sent.length, 0);
   });
 
-  it('409s undeliverable when the user has no prior contact (cold start = v2)', async () => {
+  it('409s undeliverable when the user has no prior contact and cold-start is disabled', async () => {
     const sent: Sent[] = [];
     const r = await deliverDm(deps(createThreadStore(), sent), { platformUserId: 'aad-user-1', message: 'hi' });
     assert.equal(r.status, 409);
     assert.equal(r.json.reason, 'no_prior_contact');
+    assert.equal(sent.length, 0);
+  });
+
+  it('400s when cold-start needs a tenantId but the caller omitted it', async () => {
+    const sent: Sent[] = [];
+    const r = await deliverDm(
+      deps(createThreadStore(), sent, true, {
+        coldStartEnabled: true,
+        createColdStartConversation: async () => {
+          throw new Error('should not create without tenant');
+        },
+      }),
+      { platformUserId: 'aad-user-1', botSlug: 'maestro', message: 'hi' },
+    );
+    assert.equal(r.status, 400);
+    assert.equal(r.json.error, 'bad_request');
+    assert.equal(sent.length, 0);
+  });
+
+  it('409s when cold-start is enabled but no send bot can be resolved', async () => {
+    const sent: Sent[] = [];
+    const r = await deliverDm(
+      deps(createThreadStore(), sent, true, { coldStartEnabled: true }),
+      { platformUserId: 'aad-user-1', tenantId: 'tenant-1', message: 'hi' },
+    );
+    assert.equal(r.status, 409);
+    assert.equal(r.json.reason, 'no_send_bot');
+    assert.equal(sent.length, 0);
+  });
+
+  it('cold-starts a pinned bot, records the ConversationReference, then reuses it', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    const sent: Sent[] = [];
+    const created: Created[] = [];
+    const d = deps(store, sent, true, {
+      coldStartEnabled: true,
+      createColdStartConversation: async (input) => {
+        created.push(input);
+        return {
+          conversationId: 'cold-conv-1',
+          rootActivityId: 'cold-activity-1',
+          reference: context('cold-conv-1').reference,
+        };
+      },
+    });
+
+    const first = await deliverDm(d, {
+      platformUserId: 'aad-user-1',
+      botSlug: 'maestro',
+      tenantId: 'tenant-1',
+      message: 'hello cold',
+    });
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.json, { delivered: true, botSlug: 'maestro', chunks: 1, coldStart: true });
+    assert.equal(created.length, 1);
+    assert.equal(created[0]?.aadObjectId, 'aad-user-1');
+    assert.equal(created[0]?.tenantId, 'tenant-1');
+    assert.equal(created[0]?.text, 'hello cold');
+    assert.equal(sent.length, 0, 'first chunk is sent by createConversation, not App.send');
+
+    const recorded = store.findByUserAndBot('aad-user-1', 'maestro');
+    assert.equal(recorded?.conversationId, 'cold-conv-1');
+    assert.equal(recorded?.context.tenantId, 'tenant-1');
+
+    const second = await deliverDm(d, { platformUserId: 'aad-user-1', botSlug: 'maestro', message: 'reuse' });
+    assert.equal(second.status, 200);
+    assert.equal(created.length, 1, 'second DM reuses the stored conversation');
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.conversationId, 'cold-conv-1');
+    assert.equal(sent[0]?.text, 'reuse');
+  });
+
+  it('cold-start sends only the first chunk via createConversation and the rest via App.send', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    const sent: Sent[] = [];
+    const created: Created[] = [];
+    const d = deps(store, sent, true, {
+      coldStartEnabled: true,
+      createColdStartConversation: async (input) => {
+        created.push(input);
+        return {
+          conversationId: 'cold-conv-2',
+          rootActivityId: 'cold-activity-2',
+          reference: context('cold-conv-2').reference,
+        };
+      },
+    });
+
+    const big = 'a'.repeat(30_000);
+    const r = await deliverDm(d, {
+      platformUserId: 'aad-user-1',
+      botSlug: 'maestro',
+      tenantId: 'tenant-1',
+      message: big,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.chunks, 2);
+    assert.equal(created.length, 1);
+    assert.equal(sent.length, 1);
+    assert.equal(created[0]?.text.length, 28_000);
+    assert.equal(sent[0]?.conversationId, 'cold-conv-2');
+    assert.equal(sent[0]?.text.length, 2_000);
+  });
+
+  it('maps Bot Connector createConversation failures to clear undeliverable reasons', async () => {
+    const sent: Sent[] = [];
+    const r = await deliverDm(
+      deps(createThreadStore(), sent, true, {
+        coldStartEnabled: true,
+        createColdStartConversation: async () => {
+          const err = new Error('forbidden') as Error & { response: { status: number } };
+          err.response = { status: 403 };
+          throw err;
+        },
+      }),
+      { platformUserId: 'aad-user-1', botSlug: 'maestro', tenantId: 'tenant-1', message: 'hi' },
+    );
+    assert.equal(r.status, 409);
+    assert.equal(r.json.reason, 'bot_not_installed_or_forbidden');
     assert.equal(sent.length, 0);
   });
 
