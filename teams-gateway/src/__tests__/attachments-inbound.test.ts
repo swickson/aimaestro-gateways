@@ -16,6 +16,8 @@ import { ingestAttachments, type IngestDeps, type RawInboundAttachment } from '.
 import type { AttachmentPolicy } from '../types.js';
 
 const POLICY: AttachmentPolicy = { maxBytes: 1000, maxCount: 3, denyContentTypes: ['application/x-msdownload'] };
+const DEFAULT_BYTES = new Uint8Array([1, 2, 3, 4]);
+const DEFAULT_DIGEST_HEX = createHash('sha256').update(DEFAULT_BYTES).digest('hex');
 
 interface RecordedCall {
   url: string;
@@ -53,7 +55,7 @@ function statusBody(id: string, overrides: Record<string, unknown> = {}): Record
     filename: 'safe-name.pdf',
     content_type: 'application/pdf',
     size: 4,
-    digest: 'server-digest',
+    digest: DEFAULT_DIGEST_HEX,
     scan_status: 'basic_clean',
     uploaded_at: '2026-06-14T00:00:00.000Z',
     expires_at: '2026-06-15T00:00:00.000Z',
@@ -78,7 +80,7 @@ function deps(overrides: Partial<IngestDeps> = {}): IngestDeps {
     botSlug: 'maestro',
     policy: POLICY,
     timeoutMs: 1000,
-    downloadAttachment: async () => new Uint8Array([1, 2, 3, 4]),
+    downloadAttachment: async () => DEFAULT_BYTES,
     ...overrides,
   };
 }
@@ -116,7 +118,7 @@ describe('w3 inbound attachment ingestion', () => {
       filename: 'safe-name.pdf',
       content_type: 'application/pdf',
       size: 4,
-      digest: 'server-digest',
+      digest: `sha256:${DEFAULT_DIGEST_HEX}`,
       url: 'https://maestro.test/api/v1/attachments/att-1/download?sig=abc',
       scan_status: 'basic_clean',
       uploaded_at: '2026-06-14T00:00:00.000Z',
@@ -128,6 +130,28 @@ describe('w3 inbound attachment ingestion', () => {
       calls.map((c) => c.method + ' ' + new URL(c.url).pathname.replace('/api/v1/attachments', '')),
       ['POST /upload', 'PUT /signed/put/att-1', 'POST /att-1/confirm', 'GET /att-1/status'],
     );
+  });
+
+  it('normalizes a bare-hex /status digest to the AMP sha256: wire form', async () => {
+    installFetch(happyHandlers('att-1'));
+    const res = await ingestAttachments([file()], deps());
+
+    assert.equal(res.attachments.length, 1);
+    assert.equal(res.attachments[0].digest, `sha256:${DEFAULT_DIGEST_HEX}`);
+    assert.equal(res.attachments[0].digest.slice('sha256:'.length), createHash('sha256').update(DEFAULT_BYTES).digest('hex'));
+  });
+
+  it('leaves an already-prefixed /status digest unchanged (no double-prefix)', async () => {
+    installFetch([
+      { match: '/attachments/upload', respond: () => json({ attachment_id: 'x', upload_url: 'https://maestro.test/signed/put/x' }) },
+      { match: '/signed/put/', respond: () => new Response(null, { status: 200 }) },
+      { match: '/confirm', respond: () => json({ ok: true }) },
+      { match: '/status', respond: () => json(statusBody('x', { digest: `sha256:${DEFAULT_DIGEST_HEX}` })) },
+    ]);
+    const res = await ingestAttachments([file()], deps());
+
+    assert.equal(res.attachments.length, 1);
+    assert.equal(res.attachments[0].digest, `sha256:${DEFAULT_DIGEST_HEX}`);
   });
 
   it('auth: bot Bearer on upload/confirm/status, NONE on the signed PUT', async () => {
