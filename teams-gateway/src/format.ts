@@ -107,3 +107,41 @@ export function buildCardScaffold(text: string): Record<string, unknown> {
     body: [{ type: 'TextBlock', text, wrap: true }],
   };
 }
+
+export interface StatusSummaryFact {
+  title: string;
+  value: string;
+}
+
+export interface StatusSummary {
+  title: string;
+  status: 'success' | 'warning' | 'info' | 'error';
+  description?: string;
+  facts?: StatusSummaryFact[];
+}
+
+/**
+ * Formats a StatusSummary into a clean markdown fallback text (SDK-decoupled).
+ */
+export function formatStatusSummaryFallback(data: StatusSummary): string {
+  const title = (data.title ?? 'Status Summary').trim();
+  const status = (data.status ?? 'unknown').toUpperCase();
+
+  let markdown = `**[${title}]**\n\n`;
+  markdown += `Status: **${status}**\n\n`;
+
+  if (data.description && data.description.trim() !== '') {
+    markdown += `${data.description.trim()}\n\n`;
+  }
+
+  if (data.facts && data.facts.length > 0) {
+    for (const fact of data.facts) {
+      if (fact && typeof fact === 'object' && fact.title && fact.value) {
+        markdown += `- **${fact.title.trim()}**: ${fact.value.trim()}\n`;
+      }
+    }
+  }
+
+  return markdown.trim();
+}
+

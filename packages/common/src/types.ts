@@ -106,6 +106,8 @@ export interface AMPPayload {
   /** Attachments cited on a routed/replied message (optional; gateways that don't
    *  support attachments neither set nor read this — discord is untouched). */
   attachments?: AMPAttachmentV1[];
+  /** Optional rendering hint (e.g. 'status_summary') to select a rich layout platform-side. */
+  render?: string;
 }
 
 export interface AMPMessage {
