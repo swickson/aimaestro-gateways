@@ -169,4 +169,15 @@ export interface ThreadContext {
   reference: ConversationReference;
   rootActivityId: string;
   tenantId: string;
+  /**
+   * Conversation id the outbound poller posts the agent's reply to so it lands IN
+   * the originating thread (#12). For a Teams channel this is the stable
+   * thread-root id (`<base>;messageid=<root>`) — the captured `reference.conversation.id`
+   * of a thread-ROOT message lacks the `;messageid=` suffix, so replying to it
+   * verbatim would post a NEW top-level message instead of threading. Set for
+   * channel/groupChat; OMITTED for personal (outbound then falls back to
+   * `reference.conversation.id`, the unchanged 1:1 behavior). Optional so older
+   * persisted snapshots (no field) degrade to the fallback.
+   */
+  replyConversationId?: string;
 }
