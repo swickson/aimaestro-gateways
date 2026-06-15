@@ -43,12 +43,14 @@ amp-reply <inbound-msg-id> "Your markdown reply"
 To send a **status summary card** instead of plain text, set the render selector and pass the card data as JSON in the body:
 
 ```
-amp-send <your-bot-endpoint> --reply-to <inbound-msg-id> \
+amp-send <your-bot-endpoint> "Deploy complete" \
   '{"title":"Deploy complete","status":"success","description":"v0.31 live","facts":[{"title":"Host","value":"holmes"},{"title":"Health","value":"200"}]}' \
+  --reply-to <inbound-msg-id> \
   --context '{"render":"status_summary"}'
 ```
 
-- **Selector:** `--context '{"render":"status_summary"}'` (the gateway reads `payload.render`, falling back to `payload.context.render`). Without it, the message is plain text. **Use `amp-send --reply-to <id>` for cards** — `amp-reply` does not carry `--context`; `amp-send` carries `--reply-to`, `--context`, and `--thread-id`.
+- **Command form (positional matters):** `amp-send` requires `<recipient> "<subject>" '<message>'` **positionally**, then flags. For a card the `<message>` is the `status_summary` JSON, plus `--reply-to <inbound-msg-id>` and `--context '{"render":"status_summary"}'`. Use `amp-send` (not `amp-reply` — `amp-reply` carries `--attach` but **not** `--context`).
+- **Selector:** `--context '{"render":"status_summary"}'` — the gateway reads `payload.render`, falling back to `payload.context.render`. Without it, the message is plain text.
 - **Body schema** (`status_summary`): `{ title: string, status: 'success'|'warning'|'info'|'error', description?: string, facts?: [{title, value}] }`.
 - **Safe by design:** if the card is malformed or Teams rejects it, the gateway **falls back to delivering markdown** — a card never silently drops a message. Only opt into a card for genuinely structured content; freeform text should stay markdown.
 - *(A cleaner `amp-send --render` flag is planned; until then use `--context`.)*
