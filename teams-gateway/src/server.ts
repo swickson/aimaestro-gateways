@@ -35,7 +35,7 @@ import { toBotConfigs } from './bot-registry.js';
 import { handleInbound, type InboundActivity, type InboundDeps } from './inbound.js';
 import type { RawInboundAttachment } from './attachments-inbound.js';
 import { buildAttachmentDownloader, type ConnectorTokenGetter } from './attachment-download.js';
-import { rejectMismatchedRecipient } from './recipient-binding.js';
+import { botWasMentioned, rejectMismatchedRecipient } from './recipient-binding.js';
 import { createThreadStore, type ThreadStore } from './thread-store.js';
 import { createDmRouter } from './dm.js';
 import { createUserResolver, type UserResolver } from './user-resolver.js';
@@ -81,26 +81,6 @@ function extractStrippedText(activity: {
     }
   }
   return activity.text ?? '';
-}
-
-/**
- * True when THIS bot is @mentioned in the activity (#12). Teams encodes mentions as
- * `entities[]` of `{ type:'mention', mentioned:{ id } }`; the bot is addressed when a
- * mention's `mentioned.id` equals the activity recipient (this bot's) id. Typed
- * structurally so this stays decoupled from the SDK's churn-prone activity type.
- * Conservative: no recipient id or no mention entities => not mentioned (the gate
- * then drops a non-personal message — fail-closed on addressing).
- */
-function botWasMentioned(activity: {
-  entities?: unknown;
-  recipient?: { id?: string };
-}): boolean {
-  const recipientId = activity.recipient?.id;
-  if (!recipientId || !Array.isArray(activity.entities)) return false;
-  return activity.entities.some((e) => {
-    const ent = e as { type?: string; mentioned?: { id?: string } };
-    return ent?.type === 'mention' && ent.mentioned?.id === recipientId;
-  });
 }
 
 /** Teams file-send wrapper content type — carries the real download URL + name. */

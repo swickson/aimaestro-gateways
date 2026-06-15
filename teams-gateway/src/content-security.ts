@@ -35,6 +35,11 @@ export type { TrustLevel, TrustResult, InjectionFlag };
  * Resolve the trust level for a Teams sender.
  *
  * Order (fail-closed):
+ *   0. PROVEN-AAD invariant (#12 security fix): trust elevation requires a real
+ *      AAD object id. When `senderAadObjectId` is absent (a Bot-Framework-only
+ *      sender with no `aadObjectId`), resolve to external IMMEDIATELY — before any
+ *      directory or legacy check — so a fallback identity (e.g. the BF `fromId`)
+ *      can never match an operator directory mapping or whitelist entry.
  *   1. User-directory record (preferred, authoritative): an `operator` role or
  *      `full` trustLevel is honored ONLY when the sender's Teams platform mapping
  *      is bound to the activity's tenant (`platforms[].context.tenantId ===
@@ -47,10 +52,17 @@ export type { TrustLevel, TrustResult, InjectionFlag };
  */
 export function resolveTrust(
   senderTenantId: string | undefined,
-  senderAadObjectId: string,
+  senderAadObjectId: string | undefined,
   operatorAadObjectIds: OperatorAadRef[],
   resolvedUser?: ResolvedUser | null,
 ): TrustResult {
+  // (0) No provable AAD identity => external, fail-closed, before any trust source.
+  if (!senderAadObjectId) {
+    return {
+      level: 'external',
+      reason: 'sender has no aadObjectId — not a provable AAD identity; fail closed to external',
+    };
+  }
   return resolveTrustGeneric({
     resolvedUser,
     senderDescription: senderTenantId

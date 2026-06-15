@@ -269,10 +269,13 @@ export async function handleInbound(
   }
   deps.dedupe.set(activity.activityId, true);
 
-  // AAD object id is the canonical Teams user id; fall back to the BF account id
-  // if absent (defensive — a sender without an aadObjectId can never match the
-  // tenant-scoped operator whitelist, so it stays external = fail-closed).
-  const platformUserId = activity.aadObjectId ?? activity.fromId;
+  // The PROVEN AAD object id is the ONLY identity allowed to drive trust elevation
+  // (#12 security fix). When it is ABSENT (a Bot-Framework-only sender), trust is
+  // forced external in resolveTrust below — BEFORE any directory/legacy check — so
+  // the BF `fromId` fallback can never match an operator mapping or whitelist. The
+  // fallback still drives conversation/threading/display identity, never trust.
+  const aadObjectId = activity.aadObjectId;
+  const platformUserId = aadObjectId ?? activity.fromId;
   const displayName = activity.fromName || platformUserId;
 
   // 3. Resolve sender against the Maestro user directory (auto-create on miss).
@@ -282,7 +285,9 @@ export async function handleInbound(
 
   // 4. Tenant-scoped trust (user directory preferred; legacy env fallback requires
   //    a (tenantId, aadObjectId) match; unknown/missing tenant fails closed).
-  const trust = resolveTrust(activity.tenantId, platformUserId, deps.operatorAadObjectIds, resolvedUser);
+  //    Pass the PROVEN aad id (not the fromId fallback): an absent aadObjectId
+  //    resolves to external regardless of any directory record the fallback hit.
+  const trust = resolveTrust(activity.tenantId, aadObjectId, deps.operatorAadObjectIds, resolvedUser);
 
   // 5. Scan + wrap via the SHARED scanner (operator bypasses; external is wrapped).
   const { sanitized, flags } = sanitizeTeamsMessage({
