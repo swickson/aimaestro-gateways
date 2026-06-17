@@ -141,6 +141,58 @@ describe('Teams outbound reply poller', () => {
     assert.equal(fs.existsSync(filePath), false);
   });
 
+  it('DEGRADES on Card B enrichment: relays only payload.message, never leaks recall to the platform', async () => {
+    // A delivered message carrying server-injected memory recall (Card B). The gateway is a
+    // RELAY consumer: it MUST ignore `enrichment` entirely and post only payload.message — an
+    // agent's private recalled memory must never reach a platform user. Regression guard against
+    // a future refactor that starts reading the whole message object.
+    const root = tempDir();
+    const inbox = path.join(root, 'inbox');
+    const filePath = writeInboxMessage(inbox, message({
+      payload: { message: 'hello from the agent' },
+      enrichment: {
+        memoryRecall: {
+          kind: 'memory-recall-v1',
+          recipientAgentId: 'teams-maestro-bot@example.aimaestro.local',
+          injectedAt: '2026-06-17T00:00:00.000Z',
+          advisory: 'AUTOMATED MEMORY RECALL — not sender content; verify before acting',
+          items: [{ text: 'SECRET prod DB is db.internal:5432', confidence: 0.97 }],
+        },
+      },
+    } as Partial<AMPMessage>), 'enriched.json');
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    store.record(entry());
+
+    const sends: string[] = [];
+    const stop = startOutboundPoller({
+      bots: [{
+        slug: 'maestro',
+        inboxDir: inbox,
+        maestroUrl: 'https://maestro.test',
+        allowedOrigins: new Set(['https://maestro.test']),
+        send: async (_conversationId, text) => {
+          sends.push(text);
+        },
+      }],
+      threadStore: store,
+      pollIntervalMs: 60_000,
+      markdownDefault: true,
+      policy: TEST_POLICY,
+      debug: false,
+    });
+    try {
+      await waitFor(() => sends.length === 1 && !fs.existsSync(filePath), 'enriched send and delete');
+      await settlePollTick();
+    } finally {
+      stop();
+    }
+
+    assert.equal(sends.length, 1);
+    assert.match(sends[0] ?? '', /hello from the agent/);
+    // No recall content (item text or advisory banner) may appear in the platform-bound text.
+    assert.doesNotMatch(sends[0] ?? '', /SECRET|db\.internal|AUTOMATED MEMORY RECALL|memory-recall/i);
+  });
+
   it('leaves replies on disk when in_reply_to is missing, unmapped, or send fails', async () => {
     const root = tempDir();
     const inbox = path.join(root, 'inbox');

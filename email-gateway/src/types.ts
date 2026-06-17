@@ -29,6 +29,12 @@ export interface AMPPayload {
 export interface AMPMessage {
   envelope: AMPEnvelope;
   payload: AMPPayload;
+  /**
+   * Card B receiver-added enrichment (memory recall). Gateways DEGRADE: ignore it and
+   * relay only payload.message — never render recall to a platform user (memory leak).
+   * Typed `unknown` to force a deliberate cast; canonical type = @aimaestro/common Enrichment.
+   */
+  enrichment?: unknown;
 }
 
 export interface AMPRouteRequest {
