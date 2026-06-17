@@ -132,6 +132,52 @@ export interface AMPPayload {
   render?: string;
 }
 
+/**
+ * One recalled memory item surfaced by the recipient Maestro's retrieval middleware
+ * (Card B). `text` is the recalled snippet; `confidence` (0..1) is the retrieval score.
+ */
+export interface MemoryRecallItem {
+  text: string;
+  confidence: number;
+  /** Times-seen / reinforcement count, when the memory store tracks it. */
+  reinforcement?: number;
+  /** Opaque memory id for trace/audit + cross-turn dedupe. */
+  sourceId?: string;
+}
+
+/**
+ * Server-injected memory recall for the RECIPIENT agent (Card B). Carries its own
+ * provenance inline so a consumer can render it as clearly-not-sender content without
+ * out-of-band knowledge: `recipientAgentId` = whose memory; `advisory` = the honest
+ * framing (aligned to the Card A banner); `items` = the ranked recalls.
+ */
+export interface MemoryRecall {
+  /** Schema marker; a consumer that doesn't recognize the version MUST ignore the object. */
+  kind: 'memory-recall-v1';
+  recipientAgentId: string;
+  /** Maestro injection timestamp (recipient clock, not the sender's). */
+  injectedAt: string;
+  advisory: string;
+  items: MemoryRecallItem[];
+}
+
+/**
+ * Receiver-added advisory enrichment (Card B). A TOP-LEVEL `AMPMessage` sibling — NOT
+ * inside `payload` (which is sender-authored and covered by `payload_hash`) and NOT
+ * inside `envelope` (which is in the webhook HMAC body). It is therefore outside BOTH
+ * the sender Ed25519 preimage and the outbound webhook HMAC, and is SERVER-AUTHORITATIVE
+ * (the recipient Maestro populates it exclusively; a sender can never supply it).
+ *
+ * GATEWAY STANCE (§6): the gateways are RELAY consumers, not render consumers — they
+ * DEGRADE, i.e. ignore `enrichment` entirely and deliver only `payload.message`. Surfacing
+ * an agent's private recalled memory to an external platform user would be a memory leak,
+ * so no gateway renders it. The type is declared here for contract parity + so the
+ * degrade path is type-checked, NOT because any gateway reads it.
+ */
+export interface Enrichment {
+  memoryRecall?: MemoryRecall;
+}
+
 export interface AMPMessage {
   envelope: AMPEnvelope;
   payload: AMPPayload;
@@ -145,6 +191,11 @@ export interface AMPMessage {
     delivery_method?: string;
     status?: string;
   };
+  /**
+   * Receiver-added, server-authoritative advisory enrichment (Card B). Optional + additive;
+   * gateways ignore it (see `Enrichment` — DEGRADE, do not render). Outside every signature.
+   */
+  enrichment?: Enrichment;
 }
 
 export interface AMPRouteRequest {
