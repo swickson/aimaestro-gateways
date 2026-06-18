@@ -38,6 +38,16 @@ const DEFAULT_MAX_ENTRIES = 5000;
  * store by age in addition to the count cap (red-team / Maestro core "bounded store").
  */
 const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/**
+ * Default DM-target horizon (#26): the `byUser` / `byUserAndBot` indexes drive
+ * proactive-DM delivery, and a Teams 1:1's `conversationId` is stable for the life
+ * of the conversation — so pruning that mapping at the 24h reply-recency horizon
+ * caused a spurious cold-start (which then hit the #25 chunk[0] loss). The DM-target
+ * mapping is therefore DURABLE by default (unbounded age); the `maxEntries` count cap
+ * is its backstop. A long-lived `serviceUrl`/reference may go stale, but #25 delivers
+ * via `sendChunk` against the re-ensured conversation, so that's acceptable.
+ */
+const DEFAULT_USER_MAX_AGE_MS = Infinity;
 /** NUL — safe composite-key separator (never appears in a slug/GUID/AMP id). */
 const SEP = '\u0000';
 
@@ -98,11 +108,19 @@ export interface ThreadStoreOptions {
   /** Insertion-order eviction bound (oldest dropped first). */
   maxEntries?: number;
   /**
-   * Recency horizon in ms. Entries older than this are lazily expired on lookup
-   * and dropped from `snapshot()`/`restore()`. Pass `Infinity` to disable
-   * age-based pruning (count cap still applies). Defaults to 24h.
+   * REPLY-recency horizon in ms (governs `byAmpId` / `recentByConv` — the
+   * `in_reply_to` + `isNewConversation` lookups). Entries older than this are lazily
+   * expired on the reply-path lookups. Pass `Infinity` to disable age-based pruning
+   * (count cap still applies). Defaults to 24h.
    */
   maxAgeMs?: number;
+  /**
+   * DM-TARGET horizon in ms (governs `byUser` / `byUserAndBot` — proactive-DM
+   * resolution; #26). Decoupled from `maxAgeMs` so the durable DM mapping outlives
+   * the reply-recency window. Defaults to `Infinity` (durable; `maxEntries` is the
+   * backstop). Reply-recency pruning is unaffected by this value.
+   */
+  userMaxAgeMs?: number;
   /** Injected clock for deterministic tests. Defaults to `Date.now`. */
   now?: () => number;
 }
@@ -120,6 +138,7 @@ function userBotKey(aadObjectId: string, botSlug: string): string {
 export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore {
   const maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
+  const userMaxAgeMs = options.userMaxAgeMs ?? DEFAULT_USER_MAX_AGE_MS;
   const now = options.now ?? Date.now;
   // Primary index: (botSlug, ampMessageId) -> entry. Insertion-ordered (Map) for
   // O(1) oldest-eviction.
@@ -133,34 +152,47 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
   // (drives findByUserAndBot when the DM caller pins a botSlug).
   const byUserAndBot = new Map<string, ThreadEntry>();
 
-  /**
-   * True once an entry has aged past the recency horizon. Measured from
-   * `recordedAt` (the store's own clock), falling back to `createdAt` only for an
-   * entry that somehow lacks a record stamp (defensive).
-   */
+  /** Age in ms from the store's own clock (`recordedAt`), defensively falling back
+   * to `createdAt` for an entry that somehow lacks a record stamp. */
+  function ageMs(entry: ThreadEntry): number {
+    return now() - (entry.recordedAt ?? entry.createdAt);
+  }
+  /** Past the REPLY-recency horizon (`byAmpId` / `recentByConv`). */
   function isExpired(entry: ThreadEntry): boolean {
-    return now() - (entry.recordedAt ?? entry.createdAt) > maxAgeMs;
+    return ageMs(entry) > maxAgeMs;
+  }
+  /** Past the DM-TARGET horizon (`byUser` / `byUserAndBot`); #26. Decoupled from
+   * `isExpired` so the durable DM mapping outlives the reply-recency window. */
+  function isUserExpired(entry: ThreadEntry): boolean {
+    return ageMs(entry) > userMaxAgeMs;
   }
 
-  /** Drop an entry from every index (used by lazy expiry). */
-  function drop(entry: ThreadEntry): void {
+  // Lazy expiry is SPLIT per index family (#26): a reply-path lookup aging out an
+  // entry must NOT also tear down the still-live DM-target mapping (the single
+  // all-index drop() was the root cause of the spurious cold-start). Each family
+  // prunes only its own indexes; the count-cap eviction is the only all-index drop.
+
+  /** Drop an entry from the reply-recency indexes only (`byAmpId` + `recentByConv`). */
+  function dropReplyIndexes(entry: ThreadEntry): void {
     byAmpId.delete(ampKey(entry.botSlug, entry.ampMessageId));
     const ck = convKey(entry.botSlug, entry.conversationId);
     if (recentByConv.get(ck) === entry) {
       recentByConv.delete(ck);
     }
-    // By-user pointers: clear only when they still point AT this entry. Safe to
-    // clear without promoting a runner-up — the by-user pointer always holds the
-    // user's NEWEST entry, and expiry is age-monotonic (the newest expires last),
-    // so a dropped pointer can never strand a newer live entry behind it.
-    if (entry.aadObjectId) {
-      if (byUser.get(entry.aadObjectId) === entry) {
-        byUser.delete(entry.aadObjectId);
-      }
-      const ubk = userBotKey(entry.aadObjectId, entry.botSlug);
-      if (byUserAndBot.get(ubk) === entry) {
-        byUserAndBot.delete(ubk);
-      }
+  }
+
+  /** Drop an entry from the DM-target indexes only (`byUser` + `byUserAndBot`).
+   * Clear a pointer only when it still points AT this entry — the pointer always
+   * holds the user's NEWEST entry and expiry is age-monotonic (newest expires last),
+   * so a cleared pointer can never strand a newer live entry behind it. */
+  function dropUserIndexes(entry: ThreadEntry): void {
+    if (!entry.aadObjectId) return;
+    if (byUser.get(entry.aadObjectId) === entry) {
+      byUser.delete(entry.aadObjectId);
+    }
+    const ubk = userBotKey(entry.aadObjectId, entry.botSlug);
+    if (byUserAndBot.get(ubk) === entry) {
+      byUserAndBot.delete(ubk);
     }
   }
 
@@ -225,7 +257,7 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
     const entry = byAmpId.get(ampKey(botSlug, ampMessageId));
     if (!entry) return null;
     if (isExpired(entry)) {
-      drop(entry);
+      dropReplyIndexes(entry);
       return null;
     }
     return entry;
@@ -235,7 +267,7 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
     const entry = recentByConv.get(convKey(botSlug, conversationId));
     if (!entry) return null;
     if (isExpired(entry)) {
-      drop(entry);
+      dropReplyIndexes(entry);
       return null;
     }
     return entry;
@@ -244,8 +276,8 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
   function findLatestByUser(aadObjectId: string): ThreadEntry | null {
     const entry = byUser.get(aadObjectId);
     if (!entry) return null;
-    if (isExpired(entry)) {
-      drop(entry);
+    if (isUserExpired(entry)) {
+      dropUserIndexes(entry);
       return null;
     }
     return entry;
@@ -254,16 +286,30 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
   function findByUserAndBot(aadObjectId: string, botSlug: string): ThreadEntry | null {
     const entry = byUserAndBot.get(userBotKey(aadObjectId, botSlug));
     if (!entry) return null;
-    if (isExpired(entry)) {
-      drop(entry);
+    if (isUserExpired(entry)) {
+      dropUserIndexes(entry);
       return null;
     }
     return entry;
   }
 
   function snapshot(): ThreadStoreSnapshot {
-    // Persist only live entries — never carry aged-out references across a restart.
-    return { version: 1, entries: [...byAmpId.values()].filter((e) => !isExpired(e)) };
+    // Persist every entry still live under EITHER horizon: reply-recency entries so a
+    // reply can land post-restart, AND DM-target entries (#26) so a proactive DM still
+    // resolves — including one whose reply-path lookup already lazily removed it from
+    // byAmpId. Union the three index families and dedup by identity (byAmpId first to
+    // preserve insertion/eviction order; DM-only-live entries append after).
+    const seen = new Set<ThreadEntry>();
+    const entries: ThreadEntry[] = [];
+    const consider = (e: ThreadEntry): void => {
+      if (seen.has(e)) return;
+      seen.add(e);
+      if (!isExpired(e) || !isUserExpired(e)) entries.push(e);
+    };
+    for (const e of byAmpId.values()) consider(e);
+    for (const e of byUser.values()) consider(e);
+    for (const e of byUserAndBot.values()) consider(e);
+    return { version: 1, entries };
   }
 
   function restore(snap: ThreadStoreSnapshot): void {
@@ -271,10 +317,20 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
     recentByConv.clear();
     byUser.clear();
     byUserAndBot.clear();
-    // Restore in insertion order so eviction ordering + recency stay consistent;
-    // skip anything that aged out while the gateway was down.
-    for (const entry of snap.entries) {
-      if (!isExpired(entry)) {
+    // Restore in CHRONOLOGICAL order so byAmpId's insertion order = eviction order. snapshot()
+    // appends DM-only-live entries (already reply-expired, so older) AFTER the byAmpId block,
+    // so the raw snap.entries order would record those oldest entries LAST — making byAmpId
+    // treat them as newest and evictIfNeeded drop newer active entries first (#26 eviction-order
+    // bug). Sort by the store's own clock (recordedAt), falling back to createdAt, before the
+    // record loop. Skip anything aged out of BOTH horizons while the gateway was down; record()
+    // repopulates all indexes — the reply indexes then self-prune on the next reply-path lookup.
+    const sortedEntries = [...snap.entries].sort((a, b) => {
+      const timeA = a.recordedAt ?? a.createdAt;
+      const timeB = b.recordedAt ?? b.createdAt;
+      return timeA - timeB;
+    });
+    for (const entry of sortedEntries) {
+      if (!isExpired(entry) || !isUserExpired(entry)) {
         record(entry);
       }
     }

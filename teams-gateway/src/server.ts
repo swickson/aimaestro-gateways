@@ -502,23 +502,21 @@ async function main(): Promise<void> {
           ...(markdown ? {} : { textFormat: 'plain' }),
         });
       },
-      createColdStartConversation: async ({ botSlug, tenantId, aadObjectId, text, markdown }) => {
+      createColdStartConversation: async ({ botSlug, tenantId, aadObjectId }) => {
         const app = apps.get(botSlug);
         const bot = config.bots.find((b) => b.slug === botSlug);
         if (!app || !bot) throw new Error(`no App for bot '${botSlug}'`);
 
         const user: Account = { id: aadObjectId, aadObjectId, name: aadObjectId, role: 'user' };
         const botAccount: Account = { id: bot.appId, name: bot.slug, role: 'bot' };
+        // Ensure-only: NO inline `activity`. On an existing 1:1 the inline activity is
+        // silently dropped by Bot Framework (#25) — deliverDm posts every chunk via
+        // App.send instead. `created.activityId` is then empty; guards below handle it.
         const created = await app.api.conversations.create({
           isGroup: false,
           tenantId,
           bot: botAccount,
           members: [user],
-          activity: {
-            type: 'message',
-            text,
-            ...(markdown ? {} : { textFormat: 'plain' }),
-          },
         });
         const reference: ConversationReference = {
           serviceUrl: created.serviceUrl,

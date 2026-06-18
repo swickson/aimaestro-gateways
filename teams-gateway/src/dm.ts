@@ -37,8 +37,6 @@ export interface CreateColdStartConversationInput {
   botSlug: string;
   tenantId: string;
   aadObjectId: string;
-  text: string;
-  markdown: boolean;
 }
 
 export interface CreateColdStartConversationResult {
@@ -54,8 +52,10 @@ export interface DmDeps {
   /** Post one chunk under `botSlug` into `conversationId` (bound to that bot's App.send). */
   sendChunk(botSlug: string, conversationId: string, text: string, markdown: boolean): Promise<void>;
   /**
-   * Create a personal 1:1 conversation and send the FIRST chunk as the creation
-   * activity. Bound in server.ts to the per-bot SDK App; mocked in unit tests.
+   * Ensure a personal 1:1 conversation exists and return its id + reference WITHOUT
+   * posting any inline activity (an existing 1:1 would silently drop it — #25).
+   * All chunks are delivered separately via `sendChunk`. Bound in server.ts to the
+   * per-bot SDK App; mocked in unit tests.
    */
   createColdStartConversation?: (input: CreateColdStartConversationInput) => Promise<CreateColdStartConversationResult>;
   /** Feature flag: default false preserves the no_prior_contact 409 contract. */
@@ -74,7 +74,9 @@ function badRequest(detail: string): DmResult {
 }
 
 function coldStartError(err: unknown): DmResult {
-  const e = err as {
+  // Null-guard the rejection (#18): a null/undefined throw must fall through to the
+  // default 502 mapping, never throw again inside the mapper and surface as a 500.
+  const e = (err ?? {}) as {
     status?: unknown;
     statusCode?: unknown;
     code?: unknown;
@@ -168,14 +170,20 @@ export async function deliverDm(deps: DmDeps, body: unknown): Promise<DmResult> 
     const prefix = subject ? (deps.markdownDefault ? `**${subject}**\n\n` : `${subject}\n\n`) : '';
     const chunks = chunkText(prefix + message, TEAMS_MAX_LENGTH);
     try {
+      // Ensure the 1:1 exists (idempotent, NO inline activity — so an EXISTING
+      // conversation can no longer silently drop chunk[0]; #25), then deliver EVERY
+      // chunk via the proven warm send leg (uniform for new + existing 1:1s).
       const created = await deps.createColdStartConversation({
         botSlug,
         tenantId,
         aadObjectId: platformUserId,
-        text: chunks[0] ?? '',
-        markdown: deps.markdownDefault,
       });
-      const createdAt = Date.now();
+      for (const chunk of chunks) {
+        await deps.sendChunk(botSlug, created.conversationId, chunk, deps.markdownDefault);
+      }
+      // Persist the reference only AFTER every chunk is delivered (#17): a
+      // mid-sequence failure throws above, leaving NO record, so a caller retry
+      // re-runs this idempotent cold path rather than a warm-path re-send of chunk[0].
       deps.threadStore.record({
         botSlug,
         conversationId: created.conversationId,
@@ -186,18 +194,17 @@ export async function deliverDm(deps: DmDeps, body: unknown): Promise<DmResult> 
           rootActivityId: created.rootActivityId,
           tenantId,
         },
-        createdAt,
+        createdAt: Date.now(),
       });
-      for (const chunk of chunks.slice(1)) {
-        await deps.sendChunk(botSlug, created.conversationId, chunk, deps.markdownDefault);
-      }
       console.log(`[TEAMS] /api/gateway/dm cold-start delivered to ${platformUserId} via ${botSlug} (${chunks.length} chunk(s)).`);
       return { status: 200, json: { delivered: true, botSlug, chunks: chunks.length, coldStart: true } };
     } catch (err) {
       const mapped = coldStartError(err);
+      // Null-safe (#18): a null/undefined rejection must not throw here either.
+      const detail = err instanceof Error ? err.message : String(err);
       console.error(
         `[TEAMS] /api/gateway/dm cold-start failed for platformUserId=${platformUserId} bot=${botSlug} ` +
-          `tenant=${tenantId}: ${(err as Error).message}`,
+          `tenant=${tenantId}: ${detail}`,
       );
       return mapped;
     }

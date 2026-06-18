@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { deliverDm, type DmDeps, type CreateColdStartConversationInput, type CreateColdStartConversationResult } from '../dm.js';
+import { TEAMS_MAX_LENGTH } from '../format.js';
 import { createThreadStore, type ThreadStore } from '../thread-store.js';
 import type { ThreadContext } from '../types.js';
 
@@ -98,10 +99,10 @@ describe('#13 (a) cold-start OFF preserves the no_prior_contact 409', () => {
 });
 
 // ---------------------------------------------------------------------------
-// (b) First chunk via createConversation; no duplicate App.send.
+// (b) Ensure conversation first, then deliver every chunk via App.send.
 // ---------------------------------------------------------------------------
-describe('#13 (b) createConversation owns the first chunk', () => {
-  it('single chunk: create gets it, sendChunk is never called', async () => {
+describe('#13 (b) createConversation only ensures the conversation', () => {
+  it('single chunk: create posts no inline text; sendChunk delivers chunk[0]', async () => {
     const store = createThreadStore({ maxAgeMs: Infinity });
     const sent: Sent[] = [];
     const created: CreateColdStartConversationInput[] = [];
@@ -115,11 +116,13 @@ describe('#13 (b) createConversation owns the first chunk', () => {
     assert.equal(r.json.coldStart, true);
     assert.equal(r.json.chunks, 1);
     assert.equal(created.length, 1);
-    assert.equal(created[0]?.text, 'only one');
-    assert.equal(sent.length, 0, 'no App.send for a single-chunk cold-start');
+    assert.deepEqual(created[0], { botSlug: 'maestro', tenantId: 't-1', aadObjectId: 'aad-77' });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.conversationId, 'cold-aad-77');
+    assert.equal(sent[0]?.text, 'only one');
   });
 
-  it('multi chunk: create gets ONLY chunk[0]; the rest go via sendChunk; chunk[0] is never re-sent', async () => {
+  it('multi chunk: all chunks go via sendChunk exactly once in order', async () => {
     const store = createThreadStore({ maxAgeMs: Infinity });
     const sent: Sent[] = [];
     const created: CreateColdStartConversationInput[] = [];
@@ -133,15 +136,12 @@ describe('#13 (b) createConversation owns the first chunk', () => {
     assert.equal(r.status, 200);
     assert.equal(r.json.chunks, 2);
     assert.equal(created.length, 1);
-    assert.equal(sent.length, 1, 'exactly chunks-1 App.send calls');
-    const firstChunk = created[0]?.text ?? '';
-    // The single sendChunk payload must be the SECOND chunk, never a repeat of the first.
-    assert.notEqual(sent[0]?.text, firstChunk, 'chunk[0] must not be re-sent via App.send');
-    // Total bytes preserved across the two legs (no loss, no dup).
-    assert.equal((firstChunk + sent[0]?.text).length, big.length);
+    assert.equal(sent.length, 2);
+    assert.equal(sent.map((s) => s.text).join(''), big);
+    assert.ok(sent.every((s) => s.conversationId === 'cold-aad-77'));
   });
 
-  it('subject is prepended to the first (creation) chunk, bold in markdown mode', async () => {
+  it('subject is prepended to chunk[0], bold in markdown mode', async () => {
     const store = createThreadStore({ maxAgeMs: Infinity });
     const sent: Sent[] = [];
     const created: CreateColdStartConversationInput[] = [];
@@ -152,7 +152,35 @@ describe('#13 (b) createConversation owns the first chunk', () => {
       message: 'body',
       subject: 'Heads up',
     });
-    assert.equal(created[0]?.text, '**Heads up**\n\nbody');
+    assert.equal(created.length, 1);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.text, '**Heads up**\n\nbody');
+  });
+
+  it('#25 existing 1:1: create returns an existing conversation id and chunk[0] is still delivered', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    const sent: Sent[] = [];
+    const created: CreateColdStartConversationInput[] = [];
+    const deps = coldDeps(store, sent, created, {
+      createResult: () => ({
+        conversationId: 'existing-1-1',
+        rootActivityId: 'existing-root',
+        reference: reference('existing-1-1'),
+      }),
+    });
+
+    const r = await deliverDm(deps, {
+      platformUserId: 'aad-77',
+      botSlug: 'maestro',
+      tenantId: 't-1',
+      message: 'first chunk must not vanish',
+    });
+
+    assert.equal(r.status, 200);
+    assert.equal(created.length, 1);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.conversationId, 'existing-1-1');
+    assert.equal(sent[0]?.text, 'first chunk must not vanish');
   });
 });
 
@@ -177,9 +205,9 @@ describe('#13 (c) cold-start persists the reference for reuse', () => {
     const r2 = await deliverDm(deps, { platformUserId: 'aad-77', botSlug: 'maestro', message: 'second' });
     assert.equal(r2.status, 200);
     assert.equal(created.length, 1, 'second DM must NOT create again');
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0]?.conversationId, 'cold-aad-77');
-    assert.equal(sent[0]?.text, 'second');
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1]?.conversationId, 'cold-aad-77');
+    assert.equal(sent[1]?.text, 'second');
     assert.equal(r2.json.coldStart, undefined, 'warm reuse is not flagged coldStart');
   });
 
@@ -210,6 +238,8 @@ describe('#13 (d) Bot Connector failure mapping', () => {
     { name: 'code wrong_tenant → 409', err: Object.assign(new Error('x'), { code: 'wrong_tenant' }), status: 409, reason: 'wrong_tenant_or_unreachable' },
     { name: '500 → 502 cold_start_failed', err: Object.assign(new Error('x'), { status: 500 }), status: 502, reason: 'cold_start_failed' },
     { name: 'opaque error → 502', err: new Error('boom'), status: 502, reason: 'cold_start_failed' },
+    { name: 'null rejection → 502', err: null, status: 502, reason: 'cold_start_failed' },
+    { name: 'undefined rejection → 502', err: undefined, status: 502, reason: 'cold_start_failed' },
   ];
 
   for (const c of cases) {
@@ -226,6 +256,28 @@ describe('#13 (d) Bot Connector failure mapping', () => {
       assert.equal(store.size(), 0, 'a FAILED cold-start must persist nothing (retry re-attempts, no phantom reuse)');
     });
   }
+
+  it('#18 catch-path log line is null-safe when createConversation rejects null', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    const sent: Sent[] = [];
+    const created: CreateColdStartConversationInput[] = [];
+    const original = console.error;
+    const lines: string[] = [];
+    console.error = (...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    };
+    try {
+      const deps = coldDeps(store, sent, created, { createThrows: () => { throw null; } });
+      const r = await deliverDm(deps, { platformUserId: 'aad-77', botSlug: 'maestro', tenantId: 't-1', message: 'hi' });
+      assert.equal(r.status, 502);
+      assert.equal(r.json.reason, 'cold_start_failed');
+      assert.equal(lines.length, 1);
+      assert.match(lines[0] ?? '', /cold-start failed/);
+      assert.match(lines[0] ?? '', /null/);
+    } finally {
+      console.error = original;
+    }
+  });
 
   it('cold-start enabled but no create dependency wired → 502 cold_start_unavailable (not silent)', async () => {
     const store = createThreadStore({ maxAgeMs: Infinity });
@@ -276,14 +328,11 @@ describe('#13 (e) scope bound enforcement', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Edge case documented for Holmes: multi-chunk cold-start, first chunk created +
-// RECORDED, then a later App.send fails. The conversation is already persisted,
-// so the mapped error is returned BUT the next retry will reuse (warm path) and
-// re-send the already-delivered first chunk → potential duplicate. Captured here
-// as observed behavior, not asserted-correct.
+// Flight 1 #17: a failed cold-start records nothing, so retries do not switch to
+// the warm path and duplicate chunk[0] from a phantom conversation.
 // ---------------------------------------------------------------------------
 describe('#13 edge: partial-failure after a successful create', () => {
-  it('records the conversation even though a later chunk send fails (retry would duplicate chunk[0])', async () => {
+  it('records nothing when a later chunk send fails', async () => {
     const store = createThreadStore({ maxAgeMs: Infinity });
     const created: CreateColdStartConversationInput[] = [];
     let calls = 0;
@@ -300,11 +349,77 @@ describe('#13 edge: partial-failure after a successful create', () => {
     };
     const big = 'y'.repeat(30_000); // 2 chunks → 1 sendChunk that throws
     const r = await deliverDm(deps, { platformUserId: 'aad-77', botSlug: 'maestro', tenantId: 't-1', message: big });
-    // create succeeded; the failed second-chunk send is mapped (503 → 502 catch-all).
     assert.equal(calls, 1);
     assert.equal(r.status, 502);
-    // OBSERVED: the conversation IS recorded despite the partial failure.
-    assert.equal(store.size(), 1, 'documents the partial-delivery/duplicate-on-retry watch item');
+    assert.equal(store.size(), 0);
+    assert.equal(store.findByUserAndBot('aad-77', 'maestro'), null);
+  });
+
+  it('#17 multi-chunk fail@chunk3 records nothing; retry resend is a documented residual', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    const delivered: string[] = [];
+    const created: CreateColdStartConversationInput[] = [];
+    let attempt = 1;
+    const deps: DmDeps = {
+      threadStore: store,
+      knownBots: new Set(['maestro']),
+      coldStartEnabled: true,
+      markdownDefault: true,
+      sendChunk: async (_botSlug, _conversationId, text) => {
+        if (attempt === 1 && delivered.length === 2) {
+          throw Object.assign(new Error('chunk 3 failed'), { status: 503 });
+        }
+        delivered.push(text);
+      },
+      createColdStartConversation: async (input) => {
+        created.push(input);
+        return { conversationId: 'cold-x', rootActivityId: 'act-x', reference: reference('cold-x') };
+      },
+    };
+    const big = `${'a'.repeat(TEAMS_MAX_LENGTH)}${'b'.repeat(TEAMS_MAX_LENGTH)}tail`; // 3 content-distinct chunks.
+
+    const first = await deliverDm(deps, { platformUserId: 'aad-77', botSlug: 'maestro', tenantId: 't-1', message: big });
+    assert.equal(first.status, 502);
+    assert.equal(store.size(), 0);
+    assert.equal(store.findByUserAndBot('aad-77', 'maestro'), null);
+    assert.equal(created.length, 1);
+    assert.equal(delivered.length, 2);
+
+    const firstChunk = delivered[0];
+    attempt = 2;
+    const retry = await deliverDm(deps, { platformUserId: 'aad-77', botSlug: 'maestro', tenantId: 't-1', message: big });
+    assert.equal(retry.status, 200);
+    assert.equal(created.length, 2);
     assert.equal(store.findByUserAndBot('aad-77', 'maestro')?.conversationId, 'cold-x');
+    // Bishop adjudication: without a caller-supplied idempotency key, a retry is
+    // indistinguishable from a new DM. The in-scope #17 contract is clean state
+    // after failure; this residual multi-chunk duplicate is deferred to a Watson
+    // contract follow-up.
+    assert.equal(delivered.filter((chunk) => chunk === firstChunk).length, 2);
+  });
+
+  it('#17 single-chunk failure records nothing; retry delivers once', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    const delivered: string[] = [];
+    let fail = true;
+    const deps: DmDeps = {
+      threadStore: store,
+      knownBots: new Set(['maestro']),
+      coldStartEnabled: true,
+      markdownDefault: true,
+      sendChunk: async (_botSlug, _conversationId, text) => {
+        if (fail) throw Object.assign(new Error('first send failed'), { status: 503 });
+        delivered.push(text);
+      },
+      createColdStartConversation: async () => ({ conversationId: 'cold-x', rootActivityId: 'act-x', reference: reference('cold-x') }),
+    };
+
+    const first = await deliverDm(deps, { platformUserId: 'aad-77', botSlug: 'maestro', tenantId: 't-1', message: 'one' });
+    assert.equal(first.status, 502);
+    assert.equal(store.size(), 0);
+    fail = false;
+    const retry = await deliverDm(deps, { platformUserId: 'aad-77', botSlug: 'maestro', tenantId: 't-1', message: 'one' });
+    assert.equal(retry.status, 200);
+    assert.deepEqual(delivered, ['one']);
   });
 });

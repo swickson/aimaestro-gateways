@@ -46,8 +46,8 @@ interface Created {
   botSlug: string;
   tenantId: string;
   aadObjectId: string;
-  text: string;
-  markdown: boolean;
+  // FLIGHT1 #25: text/markdown dropped — createColdStartConversation no longer posts
+  // an inline activity (CreateColdStartConversationInput shed these fields).
 }
 
 function deps(
@@ -155,8 +155,9 @@ describe('deliverDm (proactive DM core)', () => {
     assert.equal(created.length, 1);
     assert.equal(created[0]?.aadObjectId, 'aad-user-1');
     assert.equal(created[0]?.tenantId, 'tenant-1');
-    assert.equal(created[0]?.text, 'hello cold');
-    assert.equal(sent.length, 0, 'first chunk is sent by createConversation, not App.send');
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.conversationId, 'cold-conv-1');
+    assert.equal(sent[0]?.text, 'hello cold');
 
     const recorded = store.findByUserAndBot('aad-user-1', 'maestro');
     assert.equal(recorded?.conversationId, 'cold-conv-1');
@@ -165,12 +166,12 @@ describe('deliverDm (proactive DM core)', () => {
     const second = await deliverDm(d, { platformUserId: 'aad-user-1', botSlug: 'maestro', message: 'reuse' });
     assert.equal(second.status, 200);
     assert.equal(created.length, 1, 'second DM reuses the stored conversation');
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0]?.conversationId, 'cold-conv-1');
-    assert.equal(sent[0]?.text, 'reuse');
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1]?.conversationId, 'cold-conv-1');
+    assert.equal(sent[1]?.text, 'reuse');
   });
 
-  it('cold-start sends only the first chunk via createConversation and the rest via App.send', async () => {
+  it('cold-start sends every chunk via App.send after createConversation ensures the 1:1', async () => {
     const store = createThreadStore({ maxAgeMs: Infinity });
     const sent: Sent[] = [];
     const created: Created[] = [];
@@ -196,10 +197,39 @@ describe('deliverDm (proactive DM core)', () => {
     assert.equal(r.status, 200);
     assert.equal(r.json.chunks, 2);
     assert.equal(created.length, 1);
+    assert.equal(sent.length, 2);
+    assert.equal(sent.map((s) => s.text).join(''), big);
+    assert.ok(sent.every((s) => s.conversationId === 'cold-conv-2'));
+  });
+
+  it('#25 existing 1:1 cold-start still delivers chunk[0] via App.send', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    const sent: Sent[] = [];
+    const created: Created[] = [];
+    const d = deps(store, sent, true, {
+      coldStartEnabled: true,
+      createColdStartConversation: async (input) => {
+        created.push(input);
+        return {
+          conversationId: 'existing-personal-conv',
+          rootActivityId: 'existing-root',
+          reference: context('existing-personal-conv').reference,
+        };
+      },
+    });
+
+    const r = await deliverDm(d, {
+      platformUserId: 'aad-user-1',
+      botSlug: 'maestro',
+      tenantId: 'tenant-1',
+      message: 'hello existing',
+    });
+
+    assert.equal(r.status, 200);
+    assert.equal(created.length, 1);
     assert.equal(sent.length, 1);
-    assert.equal(created[0]?.text.length, 28_000);
-    assert.equal(sent[0]?.conversationId, 'cold-conv-2');
-    assert.equal(sent[0]?.text.length, 2_000);
+    assert.equal(sent[0]?.conversationId, 'existing-personal-conv');
+    assert.equal(sent[0]?.text, 'hello existing');
   });
 
   it('maps Bot Connector createConversation failures to clear undeliverable reasons', async () => {
