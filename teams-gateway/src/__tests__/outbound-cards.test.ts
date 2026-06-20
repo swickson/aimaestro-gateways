@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 
 import { buildCard } from '../card-builder.js';
-import { formatStatusSummaryFallback } from '../format.js';
+import { formatStatusSummaryFallback, type StatusSummary } from '../format.js';
 import { startOutboundPoller, type OutboundBot } from '../outbound.js';
 import { createThreadStore, type ThreadEntry } from '../thread-store.js';
 import type { AMPMessage, AttachmentPolicy, ThreadContext } from '../types.js';
@@ -124,6 +124,45 @@ describe('Teams Adaptive Cards Outbound', () => {
       assert.match(markdown, /Status: \*\*WARNING\*\*/);
       assert.match(markdown, /Completed with warnings/);
       assert.match(markdown, /- \*\*CPU\*\*: 98%/);
+    });
+
+    it('formatStatusSummaryFallback coerces wrong-typed fields without throwing (#19)', () => {
+      // Valid JSON, but every field is the WRONG TYPE. Before the defensive coercion
+      // this threw on .trim()/.toUpperCase() and the poller re-emitted raw JSON.
+      const malformed = {
+        title: 123,
+        status: 456,
+        description: true,
+        facts: [
+          { title: 'ok', value: 'pass' },        // valid row, kept
+          { title: 7, value: 8 },                 // numeric row, coerced
+          { title: 'missing-value' },             // dropped (no value)
+          null,                                    // dropped (not an object)
+          'not-an-object',                         // dropped
+        ],
+      } as unknown as StatusSummary;
+      let markdown = '';
+      assert.doesNotThrow(() => { markdown = formatStatusSummaryFallback(malformed); });
+      assert.match(markdown, /\*\*\[123\]\*\*/);          // numeric title stringified
+      assert.match(markdown, /Status: \*\*456\*\*/);       // numeric status stringified
+      assert.match(markdown, /true/);                      // boolean description stringified
+      assert.match(markdown, /- \*\*ok\*\*: pass/);
+      assert.match(markdown, /- \*\*7\*\*: 8/);
+      assert.doesNotMatch(markdown, /missing-value/);      // incomplete fact row dropped
+    });
+
+    it('formatStatusSummaryFallback defaults missing/empty title and status (#19)', () => {
+      const markdown = formatStatusSummaryFallback({ facts: [] } as unknown as StatusSummary);
+      assert.match(markdown, /\*\*\[Status Summary\]\*\*/);
+      assert.match(markdown, /Status: \*\*UNKNOWN\*\*/);
+    });
+
+    it('formatStatusSummaryFallback tolerates a non-array facts field (#19)', () => {
+      const markdown = formatStatusSummaryFallback(
+        { title: 'T', status: 'success', facts: 'oops' } as unknown as StatusSummary,
+      );
+      assert.match(markdown, /\*\*\[T\]\*\*/);
+      assert.match(markdown, /Status: \*\*SUCCESS\*\*/);
     });
   });
 
