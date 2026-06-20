@@ -124,20 +124,38 @@ export interface StatusSummary {
  * Formats a StatusSummary into a clean markdown fallback text (SDK-decoupled).
  */
 export function formatStatusSummaryFallback(data: StatusSummary): string {
-  const title = (data.title ?? 'Status Summary').trim();
-  const status = (data.status ?? 'unknown').toUpperCase();
+  // Defensive coercion: a malformed status_summary (valid JSON, but a field with the
+  // WRONG TYPE — e.g. {title: 123}) must still degrade to clean markdown, never throw.
+  // Calling .trim()/.toUpperCase() on a non-string throws, which would bubble to the
+  // outbound poller's catch and re-emit the raw JSON — exactly the #19 regression.
+  // str() trims strings, stringifies number/boolean primitives, and drops anything else.
+  const str = (v: unknown): string | undefined => {
+    if (typeof v === 'string') {
+      const t = v.trim();
+      return t === '' ? undefined : t;
+    }
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    return undefined;
+  };
+
+  const title = str(data?.title) ?? 'Status Summary';
+  const status = (str(data?.status) ?? 'unknown').toUpperCase();
 
   let markdown = `**[${title}]**\n\n`;
   markdown += `Status: **${status}**\n\n`;
 
-  if (data.description && data.description.trim() !== '') {
-    markdown += `${data.description.trim()}\n\n`;
+  const description = str(data?.description);
+  if (description) {
+    markdown += `${description}\n\n`;
   }
 
-  if (data.facts && data.facts.length > 0) {
-    for (const fact of data.facts) {
-      if (fact && typeof fact === 'object' && fact.title && fact.value) {
-        markdown += `- **${fact.title.trim()}**: ${fact.value.trim()}\n`;
+  const facts = data?.facts;
+  if (Array.isArray(facts)) {
+    for (const fact of facts) {
+      const factTitle = str(fact?.title);
+      const factValue = str(fact?.value);
+      if (factTitle && factValue) {
+        markdown += `- **${factTitle}**: ${factValue}\n`;
       }
     }
   }
