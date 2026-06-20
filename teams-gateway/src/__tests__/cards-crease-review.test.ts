@@ -270,15 +270,18 @@ describe('#14 poller selector + zero-loss', () => {
     assert.ok(consumed(), 'a successful fallback consumes the file (not retried)');
   });
 
-  it('valid JSON but status outside enum → no card, raw JSON delivered (degradation watch item)', async () => {
+  it('valid JSON but status outside enum → no card, degrades to markdown fallback not raw JSON (#19)', async () => {
     const { sends } = await runPoller(
       msg({ render: 'status_summary', message: JSON.stringify({ title: 'T', status: 'bogus' }) }),
     );
     assert.equal(sends.length, 1);
     assert.equal(sends[0].card, undefined);
-    // DOCUMENTS: validation-fail does NOT route through formatStatusSummaryFallback,
-    // so the user sees the raw JSON string, not a markdown summary. Lossless but ugly.
-    assert.match(sends[0].text, /"status":"bogus"/);
+    // #19: the status_summary fallback formatter now runs whenever render==='status_summary',
+    // regardless of whether the card built — a malformed card degrades to clean markdown,
+    // not the raw JSON string. (formatStatusSummaryFallback is null-safe per field.)
+    assert.match(sends[0].text, /\*\*\[T\]\*\*/);
+    assert.match(sends[0].text, /Status: \*\*BOGUS\*\*/);
+    assert.doesNotMatch(sends[0].text, /"status":"bogus"/);
   });
 
   it('empty message + render set + no attachments → nothing to post, file deleted, zero sends', async () => {

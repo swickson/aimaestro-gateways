@@ -103,7 +103,10 @@ function isRoutableScanStatus(status: AMPAttachmentV1['scan_status']): boolean {
 }
 
 function normalizeDescriptorDigest(digest: string): string {
-  return digest.startsWith('sha256:') ? digest : `sha256:${digest}`;
+  // Case-insensitive prefix check to match outbound isValidDigest (`/^sha256:/i`).
+  // Guards against a `SHA256:`-prefixed input being re-prefixed to `sha256:SHA256:…`.
+  // No effect today (Maestro /status returns bare lowercase hex per contract). (#23)
+  return /^sha256:/i.test(digest) ? digest : `sha256:${digest}`;
 }
 
 /**
