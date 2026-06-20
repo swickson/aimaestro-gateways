@@ -401,14 +401,18 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
           const card = deps.buildCard(renderSel, responseText);
           if (card) {
             cardObject = card;
-            // Generate structured markdown fallback
-            if (renderSel === 'status_summary') {
-              try {
-                const parsed = JSON.parse(responseText) as StatusSummary;
-                textToSend = formatStatusSummaryFallback(parsed);
-              } catch {
-                textToSend = responseText;
-              }
+          }
+          // Generate the structured markdown fallback for status_summary REGARDLESS
+          // of whether the card built. A malformed status_summary (valid JSON, bad
+          // field) yields a null card; without this hoist that case shipped the raw
+          // JSON string instead of degrading to clean text. formatStatusSummaryFallback
+          // is null-safe per field, so a partial object still renders gracefully. (#19)
+          if (renderSel === 'status_summary') {
+            try {
+              const parsed = JSON.parse(responseText) as StatusSummary;
+              textToSend = formatStatusSummaryFallback(parsed);
+            } catch {
+              textToSend = responseText;
             }
           }
         } catch (err) {
