@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 
 import { buildCard } from '../card-builder.js';
-import { formatStatusSummaryFallback } from '../format.js';
+import { formatStatusSummaryFallback, type StatusSummary } from '../format.js';
 import { startOutboundPoller, type OutboundBot } from '../outbound.js';
 import { createThreadStore, type ThreadEntry } from '../thread-store.js';
 import type { AMPMessage, AttachmentPolicy, ThreadContext } from '../types.js';
@@ -124,6 +124,45 @@ describe('Teams Adaptive Cards Outbound', () => {
       assert.match(markdown, /Status: \*\*WARNING\*\*/);
       assert.match(markdown, /Completed with warnings/);
       assert.match(markdown, /- \*\*CPU\*\*: 98%/);
+    });
+
+    it('formatStatusSummaryFallback coerces wrong-typed fields without throwing (#19)', () => {
+      // Valid JSON, but every field is the WRONG TYPE. Before the defensive coercion
+      // this threw on .trim()/.toUpperCase() and the poller re-emitted raw JSON.
+      const malformed = {
+        title: 123,
+        status: 456,
+        description: true,
+        facts: [
+          { title: 'ok', value: 'pass' },        // valid row, kept
+          { title: 7, value: 8 },                 // numeric row, coerced
+          { title: 'missing-value' },             // dropped (no value)
+          null,                                    // dropped (not an object)
+          'not-an-object',                         // dropped
+        ],
+      } as unknown as StatusSummary;
+      let markdown = '';
+      assert.doesNotThrow(() => { markdown = formatStatusSummaryFallback(malformed); });
+      assert.match(markdown, /\*\*\[123\]\*\*/);          // numeric title stringified
+      assert.match(markdown, /Status: \*\*456\*\*/);       // numeric status stringified
+      assert.match(markdown, /true/);                      // boolean description stringified
+      assert.match(markdown, /- \*\*ok\*\*: pass/);
+      assert.match(markdown, /- \*\*7\*\*: 8/);
+      assert.doesNotMatch(markdown, /missing-value/);      // incomplete fact row dropped
+    });
+
+    it('formatStatusSummaryFallback defaults missing/empty title and status (#19)', () => {
+      const markdown = formatStatusSummaryFallback({ facts: [] } as unknown as StatusSummary);
+      assert.match(markdown, /\*\*\[Status Summary\]\*\*/);
+      assert.match(markdown, /Status: \*\*UNKNOWN\*\*/);
+    });
+
+    it('formatStatusSummaryFallback tolerates a non-array facts field (#19)', () => {
+      const markdown = formatStatusSummaryFallback(
+        { title: 'T', status: 'success', facts: 'oops' } as unknown as StatusSummary,
+      );
+      assert.match(markdown, /\*\*\[T\]\*\*/);
+      assert.match(markdown, /Status: \*\*SUCCESS\*\*/);
     });
   });
 
@@ -347,6 +386,86 @@ describe('Teams Adaptive Cards Outbound', () => {
       assert.equal(sends.length, 1);
       assert.equal(sends[0].card, undefined);
       assert.match(sends[0].text, /\*\*\[agent-one\]\*\* not-valid-json/);
+    });
+
+    it('degrades a malformed status_summary (valid JSON, bad field) to markdown, not raw JSON (#19)', async () => {
+      const root = tempDir();
+      const inbox = path.join(root, 'inbox');
+      // Valid JSON, but `status` is not in the allowed enum -> buildCard returns null.
+      // Before #19 this shipped the raw JSON string; it must now degrade to the
+      // markdown fallback like the card-success path does.
+      const payloadJSON = JSON.stringify({
+        title: 'Partial Summary',
+        status: 'bogus-status',
+        description: 'Card could not build',
+      });
+      const msg: AMPMessage = {
+        envelope: {
+          id: 'reply-bad-field',
+          from: 'agent-one@example.aimaestro.local',
+          to: 'teams-maestro-bot@example.aimaestro.local',
+          timestamp: '2026-06-09T00:00:00.000Z',
+          in_reply_to: 'amp-inbound-1',
+          version: '1.0',
+          priority: 'normal',
+          signature: null,
+          subject: 'test',
+        },
+        payload: {
+          type: 'text',
+          render: 'status_summary',
+          message: payloadJSON,
+          context: null,
+        }
+      };
+      const filePath = writeInboxMessage(inbox, msg);
+      const store = createThreadStore({ maxAgeMs: Infinity });
+      store.record(entry());
+
+      const sends: Array<{
+        conversationId: string;
+        text: string;
+        markdown: boolean;
+        card?: Record<string, unknown>;
+      }> = [];
+
+      const bots: OutboundBot[] = [
+        {
+          slug: 'maestro',
+          inboxDir: inbox,
+          maestroUrl: 'https://maestro.test',
+          allowedOrigins: new Set(['https://maestro.test']),
+          send: async (conversationId, text, markdown, attachments, card) => {
+            sends.push({ conversationId, text, markdown, card });
+          },
+        }
+      ];
+
+      const stop = startOutboundPoller({
+        bots,
+        threadStore: store,
+        pollIntervalMs: 60_000,
+        markdownDefault: true,
+        policy: TEST_POLICY,
+        debug: false,
+        buildCard,
+      });
+
+      try {
+        await waitFor(() => sends.length === 1 && !fs.existsSync(filePath), 'markdown fallback sent');
+        await settlePollTick();
+      } finally {
+        stop();
+      }
+
+      assert.equal(sends.length, 1);
+      // No card built...
+      assert.equal(sends[0].card, undefined);
+      // ...but the text is the structured markdown fallback, NOT the raw JSON.
+      assert.match(sends[0].text, /\*\*\[Partial Summary\]\*\*/);
+      assert.match(sends[0].text, /Status: \*\*BOGUS-STATUS\*\*/);
+      assert.match(sends[0].text, /Card could not build/);
+      assert.doesNotMatch(sends[0].text, /bogus-status"/); // not the raw JSON
     });
   });
 });

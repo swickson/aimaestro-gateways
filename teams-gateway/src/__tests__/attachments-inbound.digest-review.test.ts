@@ -103,6 +103,19 @@ describe('w5 cited-descriptor digest normalization (Crease correctness cross-rev
     assert.equal(res.attachments[0].digest.match(/sha256:/g)?.length, 1);
   });
 
+  it('(2b) an uppercase SHA256:-prefixed /status digest is NOT re-prefixed (#23 case-insensitive)', async () => {
+    // Before #23 the inbound check used a case-sensitive startsWith('sha256:'), so an
+    // uppercase SHA256: prefix would be re-prefixed to sha256:SHA256:<hex>. The prefix
+    // detection is now case-insensitive to match the outbound validator. (No effect on
+    // the live contract — Maestro /status returns bare lowercase hex — pure symmetry.)
+    installFetch(`SHA256:${REAL_HEX}`);
+    const res = await ingestAttachments([FILE], deps());
+
+    assert.equal(res.attachments.length, 1);
+    assert.ok(!res.attachments[0].digest.toLowerCase().includes('sha256:sha256:'), 'must not double-prefix');
+    assert.equal(res.attachments[0].digest, `SHA256:${REAL_HEX}`); // left unchanged, single prefix
+  });
+
   it('(3) the prefixed value carries the REAL sha256(bytes) hex unchanged — bytes-match holds, no integrity weakening', async () => {
     installFetch(REAL_HEX);
     const res = await ingestAttachments([FILE], deps());
