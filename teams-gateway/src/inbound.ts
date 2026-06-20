@@ -38,12 +38,15 @@ const MAX_TOPIC_HINTS = 3;
 // Maestro `/api/v1/route` 400s on an empty `payload.message` ("must have type and
 // message fields"). An attachment-only Teams message (a photo with no caption) has
 // empty text whether its attachments upload cleanly (Mode 2 success) or all fail —
-// either way an empty message means TOTAL loss. We substitute one of these CONSTANT
-// gateway placeholders so the agent still sees that something arrived. They are
-// injected AFTER the content scanner, so they MUST be constant: no filename, sender,
-// or other untrusted text interpolation (that would be an injection vector).
+// either way an empty message means TOTAL loss. We substitute gateway-authored
+// placeholders so the agent still sees that something arrived. They are injected
+// AFTER the content scanner, so they MUST NOT include filename, sender, content
+// type, or other untrusted metadata (count-only is acceptable).
 const ATTACHMENT_ONLY_PLACEHOLDER = '[Teams: attachment received — see attachments]';
 const ATTACHMENT_FAILED_PLACEHOLDER = '[Teams: an attachment was received but could not be retrieved]';
+function attachmentFailedNotice(count: number): string {
+  return `[Teams: ${count} attachment(s) received but could not be retrieved]`;
+}
 
 // ---------------------------------------------------------------------------
 // Topic hints (ported from discord-gateway/src/inbound.ts; transitional dup —
@@ -379,13 +382,22 @@ export async function handleInbound(
   }
 
   // 7.6 Empty-message guard: never POST an empty `payload.message` (Maestro 400 =
-  //     total loss). Fires for an attachment-bearing message whose scanned text is
-  //     empty — whether the attachments routed (no-caption photo) or all failed.
-  //     Placeholder is a CONSTANT (count-/name-free) injected after the scanner.
+  //     total loss). External empty text is wrapped by the scanner, so all-failed
+  //     attachment-only external messages must key off the original text instead.
   let message = sanitized;
-  if (message.trim() === '' && activity.attachments?.length) {
+  const inboundAttachmentCount = activity.attachments?.length ?? 0;
+  const routedAttachmentCount = attachments?.length ?? 0;
+  const externalAttachmentOnlyAllFailed =
+    trust.level === 'external' &&
+    activity.text.trim() === '' &&
+    inboundAttachmentCount > 0 &&
+    routedAttachmentCount === 0;
+  if (externalAttachmentOnlyAllFailed) {
+    message = attachmentFailedNotice(inboundAttachmentCount);
+    log(`external empty text with ${inboundAttachmentCount} attachment(s) — substituting failed-attachment notice.`);
+  } else if (message.trim() === '' && inboundAttachmentCount > 0) {
     message = attachments?.length ? ATTACHMENT_ONLY_PLACEHOLDER : ATTACHMENT_FAILED_PLACEHOLDER;
-    log(`empty text with ${activity.attachments.length} attachment(s) — substituting placeholder (${attachments?.length ?? 0} routed).`);
+    log(`empty text with ${inboundAttachmentCount} attachment(s) — substituting placeholder (${routedAttachmentCount} routed).`);
   }
 
   // 8. Target = this bot's default agent (the bot IS the agent selector; @AIM
