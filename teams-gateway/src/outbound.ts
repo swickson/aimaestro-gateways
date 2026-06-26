@@ -61,7 +61,7 @@ export interface OutboundBot {
    * host's Tailscale origin (`getSelfHost().url`), not necessarily `maestroUrl`.
    * Restricting to known mesh hosts keeps SSRF closed (never an arbitrary origin).
    */
-  allowedOrigins: ReadonlySet<string>;
+  getAllowedOrigins: () => ReadonlySet<string>;
   /**
    * The bot adapter's configured `serviceUrl`. Used ONLY to log a Fork-O1
    * observability warning when it diverges from the stored reference's serviceUrl
@@ -267,7 +267,7 @@ async function pullOutboundAttachments(
   }
 
   for (const att of toProcess) {
-    const invalid = validateOutboundDescriptor(att, bot.allowedOrigins, policy);
+    const invalid = validateOutboundDescriptor(att, bot.getAllowedOrigins(), policy);
     if (invalid) {
       // Malformed/hostile descriptor — DROP it (won't self-heal). Loud, never silent.
       // `att` may be a non-object here, so extract any filename defensively (no throw).
