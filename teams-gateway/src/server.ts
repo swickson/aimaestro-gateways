@@ -44,6 +44,7 @@ import { startOutboundPoller, type OutboundBot } from './outbound.js';
 import { loadMeshOrigins, OriginHolder } from './mesh-hosts.js';
 import { restoreThreadStore, saveThreadStore, startSnapshotTimer } from './thread-persistence.js';
 import { buildCard } from './card-builder.js';
+import { sendDeliveryFailureNack } from './delivery-failure.js';
 import type { GatewayConfig } from './types.js';
 
 const GATEWAY_NAME = 'teams-gateway';
@@ -561,6 +562,17 @@ async function main(): Promise<void> {
       policy: config.attachments,
       debug: config.debug,
       buildCard,
+      nack: async (toAgent, failure, fromBotSlug) => {
+        const registration = registrations.get(fromBotSlug);
+        if (!registration?.apiKey) throw new Error(`no AMP registration/apiKey for bot '${fromBotSlug}'`);
+        await sendDeliveryFailureNack({
+          maestroUrl: config.amp.maestroUrl,
+          apiKey: registration.apiKey,
+          toAgent,
+          failure,
+          timeoutMs: ROUTE_TIMEOUT_MS,
+        });
+      },
     });
     // Periodic crash-safety snapshot; the graceful shutdown path saves once more.
     stopSnapshot = startSnapshotTimer(threadStore, config.threadStorePath, config.snapshotIntervalMs);
