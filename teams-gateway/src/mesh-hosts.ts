@@ -30,6 +30,8 @@ interface RawHost {
   aliases?: unknown;
 }
 
+export type LoadMeshOriginsResult = { ok: boolean; origins?: Set<string> };
+
 export interface LoadMeshOriginsOptions {
   /** Override the source path (defaults to ~/.aimaestro/hosts.json). */
   path?: string;
@@ -53,7 +55,7 @@ function toOrigin(candidate: unknown): string | null {
 }
 
 /** Pull the host array out of array / `{hosts:[...]}` / id-keyed-map tolerantly. */
-function extractHosts(parsed: unknown): RawHost[] {
+function extractHosts(parsed: unknown): RawHost[] | null {
   if (Array.isArray(parsed)) return parsed as RawHost[];
   if (parsed && typeof parsed === 'object') {
     const obj = parsed as Record<string, unknown>;
@@ -64,7 +66,7 @@ function extractHosts(parsed: unknown): RawHost[] {
       return values as RawHost[];
     }
   }
-  return [];
+  return null;
 }
 
 /**
@@ -72,7 +74,7 @@ function extractHosts(parsed: unknown): RawHost[] {
  * `scheme://host:port` origins for every ENABLED host. Never throws — a missing or
  * malformed source logs a `[MESH]` warning and returns an empty set.
  */
-export function loadMeshOrigins(options: LoadMeshOriginsOptions = {}): Set<string> {
+export function loadMeshOrigins(options: LoadMeshOriginsOptions = {}): LoadMeshOriginsResult {
   const origins = new Set<string>();
 
   let parsed: unknown;
@@ -85,17 +87,22 @@ export function loadMeshOrigins(options: LoadMeshOriginsOptions = {}): Set<strin
       raw = readFileSync(path, 'utf-8');
     } catch (err) {
       console.warn(`[MESH] could not read hosts file at ${path} — mesh-host origin allowlist is EMPTY: ${(err as Error).message}`);
-      return origins;
+      return { ok: false };
     }
     try {
       parsed = JSON.parse(raw);
     } catch (err) {
       console.warn(`[MESH] hosts file at ${path} is not valid JSON — mesh-host origin allowlist is EMPTY: ${(err as Error).message}`);
-      return origins;
+      return { ok: false };
     }
   }
 
-  for (const host of extractHosts(parsed)) {
+  const hosts = extractHosts(parsed);
+  if (hosts === null) {
+    return { ok: false };
+  }
+
+  for (const host of hosts) {
     if (!host || typeof host !== 'object' || host.enabled !== true) continue;
     const candidates: unknown[] = [host.url, ...(Array.isArray(host.aliases) ? host.aliases : [])];
     for (const candidate of candidates) {
@@ -103,7 +110,7 @@ export function loadMeshOrigins(options: LoadMeshOriginsOptions = {}): Set<strin
       if (origin) origins.add(origin);
     }
   }
-  return origins;
+  return { ok: true, origins };
 }
 
 /**
@@ -132,15 +139,19 @@ export class OriginHolder {
    * the reload is ABORTED and the previous valid allowlist is retained.
    */
   reload(options?: LoadMeshOriginsOptions): void {
-    const newMesh = loadMeshOrigins(options);
-    if (newMesh.size === 0) {
+    const result = loadMeshOrigins(options);
+    if (!result.ok || !result.origins) {
       console.warn(
-        '[MESH] ⚠️  Reload triggered but no mesh-host origins loaded (file missing/malformed or empty). ' +
+        '[MESH] ⚠️  Reload triggered but source is missing or malformed. ' +
           'RETAINING previous allowlist to prevent silent outbound attachment drops.'
       );
       return;
     }
-    this.currentOrigins = this.buildOrigins(newMesh);
-    console.log(`[MESH] reloaded trusted outbound attachment origins: ${[...newMesh].join(', ')}`);
+    this.currentOrigins = this.buildOrigins(result.origins);
+    if (result.origins.size === 0) {
+      console.log('[MESH] reloaded trusted outbound attachment origins: <none> (all mesh hosts disabled)');
+    } else {
+      console.log(`[MESH] reloaded trusted outbound attachment origins: ${[...result.origins].join(', ')}`);
+    }
   }
 }

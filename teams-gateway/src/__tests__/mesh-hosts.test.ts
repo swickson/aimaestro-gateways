@@ -38,7 +38,7 @@ const REAL_SHAPE = {
 
 describe('loadMeshOrigins', () => {
   it('collects url + URL-parseable alias origins for every enabled host; skips bare hostnames/IPs', () => {
-    const origins = loadMeshOrigins({ json: REAL_SHAPE });
+    const origins = loadMeshOrigins({ json: REAL_SHAPE }).origins!;
 
     // canonical urls
     assert.ok(origins.has('http://203.0.113.11:23000'));
@@ -62,31 +62,37 @@ describe('loadMeshOrigins', () => {
         { id: 'off', url: 'http://100.0.0.2:23000', enabled: false, aliases: ['http://100.0.0.2:23000'] },
         { id: 'missing-flag', url: 'http://100.0.0.3:23000', aliases: [] },
       ] },
-    });
+    }).origins!;
     assert.deepEqual([...origins], ['http://100.0.0.1:23000']);
   });
 
   it('tolerates a bare host array (no { hosts } wrapper)', () => {
-    const origins = loadMeshOrigins({ json: [{ id: 'a', url: 'http://100.5.5.5:23000', enabled: true, aliases: [] }] });
+    const origins = loadMeshOrigins({ json: [{ id: 'a', url: 'http://100.5.5.5:23000', enabled: true, aliases: [] }] }).origins!;
     assert.ok(origins.has('http://100.5.5.5:23000'));
     assert.equal(origins.size, 1);
   });
 
-  it('returns an EMPTY set (no throw) for a missing file', () => {
-    const origins = loadMeshOrigins({ path: '/nonexistent/definitely/not/here/hosts.json' });
-    assert.equal(origins.size, 0);
+  it('returns ok: false for a missing file', () => {
+    const res = loadMeshOrigins({ path: '/nonexistent/definitely/not/here/hosts.json' });
+    assert.equal(res.ok, false);
   });
 
-  it('returns an EMPTY set (no throw) for malformed JSON / non-host shapes', () => {
-    assert.equal(loadMeshOrigins({ json: 'not an object' }).size, 0);
-    assert.equal(loadMeshOrigins({ json: null }).size, 0);
-    assert.equal(loadMeshOrigins({ json: { hosts: 'nope' } }).size, 0);
+  it('returns ok: false for malformed JSON / non-host shapes', () => {
+    assert.equal(loadMeshOrigins({ json: 'not an object' }).ok, false);
+    assert.equal(loadMeshOrigins({ json: null }).ok, false);
+    assert.equal(loadMeshOrigins({ json: { hosts: 'nope' } }).ok, false);
+  });
+
+  it('returns ok: true and EMPTY set for a valid topology with 0 hosts', () => {
+    const res = loadMeshOrigins({ json: { hosts: [] } });
+    assert.equal(res.ok, true);
+    assert.equal(res.origins!.size, 0);
   });
 
   it('skips a host whose url itself is not a parseable origin but keeps its valid aliases', () => {
     const origins = loadMeshOrigins({
       json: { hosts: [{ id: 'x', url: 'not-a-url', enabled: true, aliases: ['http://100.9.9.9:23000'] }] },
-    });
+    }).origins!;
     assert.deepEqual([...origins], ['http://100.9.9.9:23000']);
   });
 });
@@ -105,21 +111,32 @@ describe('OriginHolder', () => {
   it('reloads and updates origins on success, keeping maestroUrl', () => {
     const holder = new OriginHolder(MAESTRO_URL, new Set(['http://old:23000']));
     assert.ok(holder.current.has('http://old:23000'));
-    
+
     // reload with a valid shape
     holder.reload({ json: { hosts: [{ id: 'new', url: 'http://new:23000', enabled: true, aliases: [] }] } });
-    
+
     assert.equal(holder.current.size, 2);
     assert.ok(holder.current.has(MAESTRO_URL));
     assert.ok(holder.current.has('http://new:23000'));
     assert.ok(!holder.current.has('http://old:23000')); // old origin removed
   });
 
-  it('FAIL-SAFE: retains previous valid set and warns on empty/malformed source', () => {
+  it('updates to maestroUrl-only if a valid reload has all hosts disabled/removed', () => {
+    const holder = new OriginHolder(MAESTRO_URL, new Set(['http://old:23000']));
+    assert.ok(holder.current.has('http://old:23000'));
+
+    holder.reload({ json: { hosts: [] } });
+
+    assert.equal(holder.current.size, 1);
+    assert.ok(holder.current.has(MAESTRO_URL));
+    assert.ok(!holder.current.has('http://old:23000'));
+  });
+
+  it('FAIL-SAFE: retains previous valid set and warns on missing/malformed source', () => {
     const holder = new OriginHolder(MAESTRO_URL, new Set(['http://good:23000']));
     const originalSet = holder.current;
     assert.equal(originalSet.size, 2);
-    
+
     let warned = false;
     const localOrigWarn = console.warn;
     console.warn = () => { warned = true; };
@@ -128,7 +145,7 @@ describe('OriginHolder', () => {
     } finally {
       console.warn = localOrigWarn;
     }
-    
+
     // The reference must be identically preserved (never swapped)
     assert.strictEqual(holder.current, originalSet);
     assert.ok(warned, 'Expected fail-safe warning to be logged');

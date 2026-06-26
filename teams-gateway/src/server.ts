@@ -535,7 +535,8 @@ async function main(): Promise<void> {
   // set ∪ the maestroUrl origin. An EMPTY mesh set means signed urls carrying a remote
   // host's Tailscale origin will be rejected — i.e. outbound attachments are effectively
   // OFF — so warn loud and unmistakably in the startup log.
-  const meshOrigins = loadMeshOrigins();
+  const meshResult = loadMeshOrigins();
+  const meshOrigins = meshResult.ok ? meshResult.origins! : new Set<string>();
   if (meshOrigins.size === 0) {
     console.warn(
       '[MESH] ⚠️  NO mesh-host origins loaded — OUTBOUND ATTACHMENTS to remote/mesh hosts are DISABLED ' +
