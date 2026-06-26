@@ -51,7 +51,7 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
     Authorization: `Bearer ${options.apiKey}`,
   };
 
-  // Warn-once latch for the shape-(b) /last-seen route 404ing before Watson's
+  // Warn-once latch for the shape-(b) /last-seen route 404ing before Maestro core's
   // Maestro route lands (SEQUENCING): a missing route must NEVER crash/block
   // inbound, but it should surface ONCE so a permanent 404 in prod is visible.
   let warnedLastSeen404 = false;
@@ -172,7 +172,7 @@ export function createUserResolver(options: UserResolverOptions): UserResolver {
 
   /**
    * Shape (b) — fire-and-forget every-inbound last-seen report. REPLACES the old
-   * `PATCH /api/users/:id {lastSeenPerPlatform}`: emits Watson's exact
+   * `PATCH /api/users/:id {lastSeenPerPlatform}`: emits Maestro core's exact
    * `PATCH /api/users/<userId>/last-seen` with `{platform, platformUserId, context:{botSlug}}`
    * so Maestro refreshes the most-recently-inbound bot for the DM tiebreak. Never
    * blocks resolution; a 404 (route not yet deployed) is swallowed with a single

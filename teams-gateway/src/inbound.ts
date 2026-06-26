@@ -306,7 +306,7 @@ export async function handleInbound(
 
   // 6. Stable thread-root identity (#12). For channel/groupChat this is the memory
   //    key (top-level thread_id) AND the outbound reply target; personal omits it.
-  //    Derived BEFORE the recency lookup because recency keys on it (Columbo #20
+  //    Derived BEFORE the recency lookup because recency keys on it (the reviewer #20
   //    BLOCKER): two SEPARATE root posts in one channel share the RAW conversation.id
   //    (a thread-root carries no `;messageid=` suffix), so keying recency on the raw
   //    id cross-links them — root B would inherit root A's inReplyTo and
@@ -444,7 +444,7 @@ export async function handleInbound(
   //     the agent's reply can be posted back under this bot (consumed in Phase 3).
   deps.threadStore.record({
     botSlug: bot.slug,
-    // Recency-index key (#12 / Columbo #20): non-personal records under the stable
+    // Recency-index key (#12 / the reviewer #20): non-personal records under the stable
     // thread-root id so two root posts in one channel never share a recency entry;
     // personal stays byte-identical (the raw 1:1 conversation id). Both the lookup
     // (step 6b) and this write MUST agree on the key, so both use `recencyKey`.

@@ -97,7 +97,7 @@ const file: RawInboundAttachment = { name: 'doc.pdf', contentType: 'application/
 const goodDownloader = async () => new Uint8Array([1, 2, 3, 4]);
 
 // The activity() helper's sender is (tenant-1, aad-1). As an OPERATOR they bypass the
-// scanner, so empty text stays empty — the exact live-repro condition (Shane DM'd a
+// scanner, so empty text stays empty — the exact live-repro condition (the operator DM'd a
 // photo) where the empty-message guard must fire. (An EXTERNAL sender's empty text is
 // wrapped in a non-empty <external-content> envelope, so it never hits the 400 and the
 // placeholder is intentionally not needed.)

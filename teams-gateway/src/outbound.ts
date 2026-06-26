@@ -185,7 +185,7 @@ function originalMessageId(msg: AMPMessage, filePath: string): string {
  * `<id>` === the descriptor's own id — closing the "trusted-origin but arbitrary
  * internal path" (e.g. `/api/v1/agents`) SSRF angle on top of the origin allowlist.
  *
- * KIND/DIGEST tolerate the agent `amp-send --attach` WIRE form (Watson-locked): the
+ * KIND/DIGEST tolerate the agent `amp-send --attach` WIRE form (Maestro core-locked): the
  * CLI may omit `kind` (only an explicit `legacy` is rejected — mirrors Maestro
  * `/route`), and a digest may carry an optional `sha256:` prefix. Shape inference
  * requires id + url(+origin+path+id-match) + digest + scan_status + size + filename +
@@ -333,7 +333,7 @@ async function pullOutboundAttachments(
     try {
       const res = await fetch(valid.url, {
         signal: AbortSignal.timeout(ATTACHMENT_PULL_TIMEOUT_MS),
-        redirect: 'error', // a 3xx off the pinned origin must NOT be followed (Watson F2)
+        redirect: 'error', // a 3xx off the pinned origin must NOT be followed (Maestro core F2)
       });
       if (!res.ok) throw new Error(`download ${res.status}`);
       const bytes = await readBoundedBody(res, policy.maxBytes);
@@ -557,7 +557,7 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       // contract (no `render` field) — read the fallback off an opaque view rather
       // than widening that contract; narrow to string since buildCard wants a
       // string selector. (A dedicated amp-send --render flag is a separate
-      // KAI/plugin follow-up, not this lane.)
+      // the team lead/plugin follow-up, not this lane.)
       let cardObject: Record<string, unknown> | undefined;
       let textToSend = responseText;
 
@@ -614,7 +614,7 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
         return true;
       }
 
-      // Attachment-ONLY reply with nothing delivered. Distinguish WHY (Columbo P1):
+      // Attachment-ONLY reply with nothing delivered. Distinguish WHY (the reviewer P1):
       //   - a transient pull failure may self-heal → leave for retry (warn-once),
       //     never drop legitimate agent data;
       //   - but if EVERY descriptor failed policy validation (malformed/hostile) with

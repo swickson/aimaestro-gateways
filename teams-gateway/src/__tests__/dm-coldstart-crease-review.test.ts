@@ -391,9 +391,9 @@ describe('#13 edge: partial-failure after a successful create', () => {
     assert.equal(retry.status, 200);
     assert.equal(created.length, 2);
     assert.equal(store.findByUserAndBot('aad-77', 'maestro')?.conversationId, 'cold-x');
-    // Bishop adjudication: without a caller-supplied idempotency key, a retry is
+    // the orchestrator adjudication: without a caller-supplied idempotency key, a retry is
     // indistinguishable from a new DM. The in-scope #17 contract is clean state
-    // after failure; this residual multi-chunk duplicate is deferred to a Watson
+    // after failure; this residual multi-chunk duplicate is deferred to a Maestro core
     // contract follow-up.
     assert.equal(delivered.filter((chunk) => chunk === firstChunk).length, 2);
   });

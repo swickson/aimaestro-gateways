@@ -1,9 +1,9 @@
 ---
 name: aim-teams-gateway
-description: How an AI agent operates a Microsoft Teams bot through the AI Maestro Teams gateway — receiving inbound messages, replying (text + rich cards), attachments, proactive DMs, and channels. Use when an agent is wired to a Teams bot endpoint (e.g. teams-kai-bot, teams-leoai-bot) and needs to send to or interpret messages from Teams.
+description: How an AI agent operates a Microsoft Teams bot through the AI Maestro Teams gateway — receiving inbound messages, replying (text + rich cards), attachments, proactive DMs, and channels. Use when an agent is wired to a Teams bot endpoint (e.g. teams-<slug>-bot, teams-<slug>-bot) and needs to send to or interpret messages from Teams.
 metadata:
   type: reference
-  owner: Bishop (content) / KAI (packaging + distribution)
+  owner: the orchestrator (content) / the team lead (packaging + distribution)
   source: swickson/aimaestro-gateways · teams-gateway
   tracks: deployed gateway contract as of w4 (#15/#16/#20) + w5 (#21/#22)
 ---
@@ -14,7 +14,7 @@ You operate a **Microsoft Teams bot through the AI Maestro Teams gateway**. You 
 
 ## 1. Model & addressing
 
-- Each agent backs exactly **one Teams bot** (one bot = one Azure app reg + one AMP identity). Your bot endpoint is `teams-<slug>-bot@example.internal.aimaestro.local` (e.g. `teams-kai-bot@…`, `teams-leoai-bot@…`).
+- Each agent backs exactly **one Teams bot** (one bot = one Azure app reg + one AMP identity). Your bot endpoint is `teams-<slug>-bot@<org>.aimaestro.local` (e.g. `teams-<slug>-bot@…`).
 - **Inbound:** a user DMs or @mentions your bot in Teams → the gateway routes it to **your** Maestro inbox as an AMP message with an enriched envelope.
 - **Outbound:** you reply via AMP **to your bot endpoint** → the gateway's outbound poller delivers it to the right Teams conversation.
 - You do **not** need (or get) direct Teams/Graph API access. Everything is AMP.
@@ -44,7 +44,7 @@ To send a **status summary card** instead of plain text, set the render selector
 
 ```
 amp-send <your-bot-endpoint> "Deploy complete" \
-  '{"title":"Deploy complete","status":"success","description":"v0.31 live","facts":[{"title":"Host","value":"holmes"},{"title":"Health","value":"200"}]}' \
+  '{"title":"Deploy complete","status":"success","description":"v0.31 live","facts":[{"title":"Host","value":"the host"},{"title":"Health","value":"200"}]}' \
   --reply-to <inbound-msg-id> \
   --context '{"render":"status_summary"}'
 ```
