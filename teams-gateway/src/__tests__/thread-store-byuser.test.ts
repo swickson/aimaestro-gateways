@@ -42,9 +42,11 @@ describe('thread-store by-user index (Phase 5)', () => {
 
     const byUserBot = store.findByUserAndBot('aad-user-1', 'maestro');
     assert.equal(byUserBot?.ampMessageId, 'amp-1');
+    assert.deepEqual(store.distinctBotsForUser('aad-user-1'), ['maestro']);
 
     assert.equal(store.findLatestByUser('nobody'), null);
     assert.equal(store.findByUserAndBot('aad-user-1', 'echo'), null);
+    assert.deepEqual(store.distinctBotsForUser('nobody'), []);
   });
 
   it('findLatestByUser returns the most-recently-inbound bot (last-seen tiebreak)', () => {
@@ -57,11 +59,13 @@ describe('thread-store by-user index (Phase 5)', () => {
     // Both per-(user,bot) entries remain independently resolvable.
     assert.equal(store.findByUserAndBot('aad-user-1', 'maestro')?.ampMessageId, 'amp-m');
     assert.equal(store.findByUserAndBot('aad-user-1', 'echo')?.ampMessageId, 'amp-e');
+    assert.deepEqual(store.distinctBotsForUser('aad-user-1'), ['echo', 'maestro']);
 
     // A newer maestro message flips the latest pointer back to maestro.
     store.record(entry({ botSlug: 'maestro', conversationId: 'c-maestro', ampMessageId: 'amp-m2', createdAt: 300 }));
     assert.equal(store.findLatestByUser('aad-user-1')?.botSlug, 'maestro');
     assert.equal(store.findLatestByUser('aad-user-1')?.ampMessageId, 'amp-m2');
+    assert.deepEqual(store.distinctBotsForUser('aad-user-1'), ['echo', 'maestro']);
   });
 
   it('does not index entries that lack an aadObjectId (graceful pre-Phase-5 entry)', () => {
@@ -70,6 +74,25 @@ describe('thread-store by-user index (Phase 5)', () => {
 
     // Still reply-deliverable via the amp-id index, but never DM-indexed.
     assert.equal(store.findByAmpMessageId('maestro', 'amp-legacy')?.ampMessageId, 'amp-legacy');
+    assert.equal(store.findLatestByUser('aad-user-1'), null);
+    assert.deepEqual(store.distinctBotsForUser('aad-user-1'), []);
+  });
+
+  it('distinctBotsForUser lazily prunes expired user mappings', () => {
+    let clock = 1000;
+    const store = createThreadStore({ maxAgeMs: Infinity, userMaxAgeMs: 500, now: () => clock });
+    store.record(entry({ botSlug: 'maestro', conversationId: 'c-maestro', ampMessageId: 'amp-m', createdAt: 1000 }));
+    clock = 1200;
+    store.record(entry({ botSlug: 'echo', conversationId: 'c-echo', ampMessageId: 'amp-e', createdAt: 1200 }));
+
+    assert.deepEqual(store.distinctBotsForUser('aad-user-1'), ['echo', 'maestro']);
+
+    clock = 1600;
+    assert.deepEqual(store.distinctBotsForUser('aad-user-1'), ['echo']);
+    assert.equal(store.findByUserAndBot('aad-user-1', 'maestro'), null);
+
+    clock = 1800;
+    assert.deepEqual(store.distinctBotsForUser('aad-user-1'), []);
     assert.equal(store.findLatestByUser('aad-user-1'), null);
   });
 
