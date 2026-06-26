@@ -28,10 +28,10 @@ afterEach(() => {
 const REAL_SHAPE = {
   hosts: [
     {
-      id: 'holmes', name: 'holmes', url: 'http://100.81.151.18:23000', type: null, enabled: true,
-      aliases: ['holmes', '10.10.40.59', '100.81.151.18', 'http://10.10.40.59:23000', 'http://100.81.151.18:23000'],
+      id: 'mesh-a', name: 'mesh-a', url: 'http://192.0.2.1:23000', type: null, enabled: true,
+      aliases: ['mesh-a', '192.0.2.2', '192.0.2.1', 'http://192.0.2.2:23000', 'http://192.0.2.1:23000'],
     },
-    { id: 'bananajr', url: 'http://100.112.62.82:23000', type: 'remote', enabled: true, aliases: [] },
+    { id: 'mesh-b', url: 'http://192.0.2.3:23000', type: 'remote', enabled: true, aliases: [] },
     { id: 'host-c', name: 'Host C', url: 'http://host-c:23000', type: 'remote', enabled: true, aliases: ['host-c', 'host-c.internal'] },
   ],
 };
@@ -41,15 +41,15 @@ describe('loadMeshOrigins', () => {
     const origins = loadMeshOrigins({ json: REAL_SHAPE }).origins!;
 
     // canonical urls
-    assert.ok(origins.has('http://100.81.151.18:23000'));
-    assert.ok(origins.has('http://100.112.62.82:23000'));
+    assert.ok(origins.has('http://192.0.2.1:23000'));
+    assert.ok(origins.has('http://192.0.2.3:23000'));
     assert.ok(origins.has('http://host-c:23000'));
     // the http:// alias contributes the LAN-IP origin variant
-    assert.ok(origins.has('http://10.10.40.59:23000'));
+    assert.ok(origins.has('http://192.0.2.2:23000'));
     // bare hostname / bare IP aliases are NOT turned into origins
-    assert.ok(!origins.has('holmes'));
-    assert.ok(!origins.has('10.10.40.59'));
-    assert.ok(!origins.has('100.81.151.18'));
+    assert.ok(!origins.has('mesh-a'));
+    assert.ok(!origins.has('192.0.2.2'));
+    assert.ok(!origins.has('192.0.2.1'));
     assert.ok(!origins.has('host-c.internal'));
     // exactly the 4 real origins, no synthesized extras
     assert.equal(origins.size, 4);
