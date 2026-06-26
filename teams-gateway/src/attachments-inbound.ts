@@ -13,7 +13,7 @@
  * no live Maestro (PLAN: "testable WITHOUT a live Azure endpoint").
  *
  * Per-attachment sequence (contract resolved from ai-maestro source, locked by
- * the host — see ORCHESTRATOR_PLAN w3 contract block):
+ * redacted-2 — see ORCHESTRATOR_PLAN w3 contract block):
  *   1. download bytes (closure)                      -> exact byteLength (declared size)
  *   2. POST /api/v1/attachments/upload   (bot Bearer) -> { attachment_id, upload_url }
  *   3. PUT  <upload_url>                  (NO Bearer)  -> body length MUST == declared size

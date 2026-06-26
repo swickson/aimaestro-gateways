@@ -6,7 +6,7 @@
  * testable with plain strings; `outbound.ts` wraps each chunk into a message
  * Activity.
  *
- * Decisions (Phase-0 A/B, the operator-ratified):
+ * Decisions (Phase-0 A/B, Shane-ratified):
  *   - MARKDOWN DEFAULT. Teams renders a markdown subset in the message `text`
  *     field, so the v1 deliverable is markdown text + a PLAIN-TEXT fallback
  *     (the `markdown` flag) — reliable on every tenant, no schema to reject.
