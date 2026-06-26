@@ -92,13 +92,15 @@ export interface ThreadStore {
   findByAmpMessageId(botSlug: string, ampMessageId: string): ThreadEntry | null;
   findRecentByConversation(botSlug: string, conversationId: string): ThreadEntry | null;
   /**
-   * Most-recent entry for a target user across ALL bots (Phase 5). The "last-seen
-   * bot" tiebreak for a proactive DM with no caller-supplied `botSlug`: whichever
-   * bot the user most recently messaged wins. Null if the user has no live mapping.
+   * Most-recent entry for a target user across ALL bots (Phase 5). Used only after
+   * the unpinned proactive-DM path has proven the user maps to at most one live bot.
+   * Null if the user has no live mapping.
    */
   findLatestByUser(aadObjectId: string): ThreadEntry | null;
   /** Most-recent entry for a specific (user, bot) pair (Phase 5 — caller botSlug override). */
   findByUserAndBot(aadObjectId: string, botSlug: string): ThreadEntry | null;
+  /** Distinct live bot slugs for a target user, sorted for deterministic caller errors. */
+  distinctBotsForUser(aadObjectId: string): string[];
   size(): number;
   snapshot(): ThreadStoreSnapshot;
   restore(snapshot: ThreadStoreSnapshot): void;
@@ -293,6 +295,20 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
     return entry;
   }
 
+  function distinctBotsForUser(aadObjectId: string): string[] {
+    const bots = new Set<string>();
+    const prefix = `${aadObjectId}${SEP}`;
+    for (const [key, entry] of byUserAndBot.entries()) {
+      if (!key.startsWith(prefix)) continue;
+      if (isUserExpired(entry)) {
+        dropUserIndexes(entry);
+        continue;
+      }
+      bots.add(entry.botSlug);
+    }
+    return [...bots].sort();
+  }
+
   function snapshot(): ThreadStoreSnapshot {
     // Persist every entry still live under EITHER horizon: reply-recency entries so a
     // reply can land post-restart, AND DM-target entries (#26) so a proactive DM still
@@ -342,6 +358,7 @@ export function createThreadStore(options: ThreadStoreOptions = {}): ThreadStore
     findRecentByConversation,
     findLatestByUser,
     findByUserAndBot,
+    distinctBotsForUser,
     size: () => byAmpId.size,
     snapshot,
     restore,

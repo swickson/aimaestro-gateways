@@ -12,8 +12,9 @@
  * identity path lives here.
  *
  * SEND-BOT RESOLUTION (contract, locked with Watson): `body.botSlug ?? by-user
- * last-seen bot ?? 409`. The caller may pin a bot; otherwise the most-recently-
- * inbound bot wins (the `findLatestByUser` recency pointer). A pinned bot that is
+ * single-bot reuse ?? 409`. The caller may pin a bot; otherwise a single live bot
+ * can be reused. Multi-bot users must pin `botSlug`; the gateway will not guess via
+ * recency because that can send under the wrong bot identity. A pinned bot that is
  * not in the registry is a 400; a pinned bot the user never messaged is a 409.
  *
  * AUTH BOUNDARY (§0.2): this router is mounted at `/api/gateway` and gated as a
@@ -133,7 +134,7 @@ export async function deliverDm(deps: DmDeps, body: unknown): Promise<DmResult> 
   if (!platformUserId) return badRequest('platformUserId is required');
   if (message.trim() === '') return badRequest('message is required and cannot be empty');
 
-  // Resolve the conversation: pinned bot -> (user, bot) lookup; else most-recent bot.
+  // Resolve the conversation: pinned bot -> (user, bot) lookup; else single-bot reuse.
   let entry;
   if (botSlug) {
     if (!deps.knownBots.has(botSlug)) {
@@ -141,6 +142,22 @@ export async function deliverDm(deps: DmDeps, body: unknown): Promise<DmResult> 
     }
     entry = deps.threadStore.findByUserAndBot(platformUserId, botSlug);
   } else {
+    const candidateBots = deps.threadStore.distinctBotsForUser(platformUserId);
+    if (candidateBots.length > 1) {
+      console.log(
+        `[TEAMS] /api/gateway/dm ambiguous — platformUserId=${platformUserId} has multiple bot mappings; ` +
+          'caller must pin botSlug.',
+      );
+      return {
+        status: 409,
+        json: {
+          error: 'undeliverable',
+          reason: 'ambiguous_bot',
+          note: 'user has conversations with multiple bots; pin botSlug',
+          candidates: candidateBots,
+        },
+      };
+    }
     entry = deps.threadStore.findLatestByUser(platformUserId);
   }
 
