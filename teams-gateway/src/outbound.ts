@@ -15,10 +15,14 @@
  * scoped to the inbox's own bot.
  *
  * DELIVERY DECISIONS:
- *   - No `in_reply_to`, or no `(bot.slug, in_reply_to)` mapping -> SKIP + LEAVE the
- *     file for a later retry (the mapping may be mid-restore). Never delete an
- *     agent's reply (accepted v1 risk: undeliverable files accumulate -> Phase-6
- *     dead-letter follow-up).
+ *   - Terminal failures (no `in_reply_to`, broken stored reference, policy-rejected
+ *     attachment-only replies, Teams 401/403/404) emit one AMP delivery NACK and
+ *     move the file to `dead-letter/`.
+ *   - Transient failures (missing mapping during restore, attachment pull failure,
+ *     Teams 5xx/network) retry up to a bounded attempt count, then NACK +
+ *     dead-letter.
+ *   - A delivery-failure NACK that is itself undeliverable is dead-lettered
+ *     silently, never NACKed again.
  *   - Empty / whitespace-only reply -> nothing to post; delete the file (it is not
  *     "undeliverable agent data", it is no data) so it does not re-poll forever.
  *   - Successful send -> delete the file (mirrors siblings). A crash AFTER send but
@@ -35,9 +39,17 @@ import * as path from 'node:path';
 import type { AMPAttachmentV1, AMPMessage, AttachmentPolicy } from './types.js';
 import type { ThreadStore } from './thread-store.js';
 import { formatReply, formatStatusSummaryFallback, type StatusSummary } from './format.js';
+import {
+  DELIVERY_FAILURE_KIND,
+  isDeliveryFailureMessage,
+  type DeliveryFailure,
+  type DeliveryFailureReason,
+} from './delivery-failure.js';
 
 /** Per-attachment HTTP pull timeout (signed-url GET). */
 const ATTACHMENT_PULL_TIMEOUT_MS = 20_000;
+/** Bound transient delivery retries before NACK + dead-letter. */
+const DEFAULT_MAX_DELIVERY_ATTEMPTS = 5;
 
 /** Bytes pulled from a signed download url, ready for the Teams send (w3). */
 export interface OutboundAttachment {
@@ -98,6 +110,10 @@ export interface OutboundDeps {
   debug: boolean;
   /** Optional card builder function injected at the SDK boundary. */
   buildCard?: (type: string, messageText: string) => Record<string, unknown> | null;
+  /** Optional AMP NACK emitter. Terminal failures still dead-letter if absent/throws. */
+  nack?: (toAgent: string, failure: DeliveryFailure, fromBotSlug: string) => Promise<void>;
+  /** Transient delivery attempts before terminal NACK + dead-letter; default 5. */
+  maxDeliveryAttempts?: number;
 }
 
 /**
@@ -120,6 +136,41 @@ interface PullResult {
 
 /** A size-cap violation discovered DURING the pull (lying/oversize body) — a DROP, not a retry. */
 class AttachmentOverCapError extends Error {}
+
+interface AttemptState {
+  attempts: number;
+  firstSeen: number;
+}
+
+interface FailureInput {
+  reason: DeliveryFailureReason;
+  detail: string;
+  retryable: boolean;
+  attempts: number;
+}
+
+function statusFromError(err: unknown): number | undefined {
+  const e = (err ?? {}) as {
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown };
+  };
+  if (typeof e.status === 'number') return e.status;
+  if (typeof e.statusCode === 'number') return e.statusCode;
+  if (typeof e.response?.status === 'number') return e.response.status;
+  return undefined;
+}
+
+function isForbiddenOrUnreachable(err: unknown): boolean {
+  const status = statusFromError(err);
+  return status === 401 || status === 403 || status === 404;
+}
+
+function originalMessageId(msg: AMPMessage, filePath: string): string {
+  return typeof msg.envelope?.id === 'string' && msg.envelope.id.trim() !== ''
+    ? msg.envelope.id
+    : path.basename(filePath, '.json');
+}
 
 /**
  * Validate ONE agent-supplied descriptor against the gateway policy. Returns a
@@ -304,7 +355,9 @@ async function pullOutboundAttachments(
 
 export function startOutboundPoller(deps: OutboundDeps): () => void {
   let isPolling = false;
+  let stopped = false;
   let pollTimeoutId: NodeJS.Timeout | null = null;
+  const maxDeliveryAttempts = Math.max(1, Math.floor(deps.maxDeliveryAttempts ?? DEFAULT_MAX_DELIVERY_ATTEMPTS));
   // Log-on-transition state for undeliverable replies. An unmapped file sits in
   // the inbox and re-polls every tick (the mapping may be mid-restore); without
   // throttling it would log "no thread mapping" on EVERY tick → console spam as
@@ -313,11 +366,99 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
   // /removed, and pruned (below) for files that vanish from disk so the set can
   // never grow unbounded.
   const warnedUndeliverable = new Set<string>();
+  const deliveryAttempts = new Map<string, AttemptState>();
   // Every file path touched in the current scan — drives the prune above.
   const seenThisScan = new Set<string>();
 
   function debug(message: string, ...args: unknown[]): void {
     if (deps.debug) console.log(`[DEBUG] [OUTBOUND] ${message}`, ...args);
+  }
+
+  function recordAttempt(filePath: string): number {
+    const existing = deliveryAttempts.get(filePath);
+    const next = existing
+      ? { attempts: existing.attempts + 1, firstSeen: existing.firstSeen }
+      : { attempts: 1, firstSeen: Date.now() };
+    deliveryAttempts.set(filePath, next);
+    return next.attempts;
+  }
+
+  function clearLifecycleState(filePath: string): void {
+    warnedUndeliverable.delete(filePath);
+    deliveryAttempts.delete(filePath);
+  }
+
+  function makeFailure(bot: OutboundBot, msg: AMPMessage, filePath: string, input: FailureInput): DeliveryFailure {
+    return {
+      kind: DELIVERY_FAILURE_KIND,
+      originalMessageId: originalMessageId(msg, filePath),
+      botSlug: bot.slug,
+      reason: input.reason,
+      detail: input.detail,
+      retryable: input.retryable,
+      attempts: input.attempts,
+      attemptedAt: new Date().toISOString(),
+    };
+  }
+
+  function deadLetterPath(bot: OutboundBot, filePath: string): string {
+    const relative = path.relative(bot.inboxDir, filePath);
+    const safeRelative = relative.startsWith('..') || path.isAbsolute(relative)
+      ? path.basename(filePath)
+      : relative;
+    const parsed = path.parse(safeRelative);
+    const deadDir = path.join(bot.inboxDir, 'dead-letter', parsed.dir);
+    let candidate = path.join(deadDir, parsed.base);
+    let counter = 0;
+    while (fs.existsSync(candidate)) {
+      counter += 1;
+      candidate = path.join(deadDir, `${parsed.name}.${Date.now()}-${counter}${parsed.ext}`);
+    }
+    return candidate;
+  }
+
+  function moveToDeadLetter(bot: OutboundBot, filePath: string): string {
+    const target = deadLetterPath(bot, filePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.renameSync(filePath, target);
+    return target;
+  }
+
+  async function terminalFailure(
+    bot: OutboundBot,
+    filePath: string,
+    msg: AMPMessage,
+    input: FailureInput,
+    emitNack = true,
+  ): Promise<boolean> {
+    const failure = makeFailure(bot, msg, filePath, input);
+    if (emitNack) {
+      const toAgent = typeof msg.envelope?.from === 'string' ? msg.envelope.from.trim() : '';
+      if (toAgent && deps.nack) {
+        try {
+          await deps.nack(toAgent, failure, bot.slug);
+        } catch (err) {
+          console.error(`[OUTBOUND] (${bot.slug}) failed to emit delivery NACK for ${path.basename(filePath)}:`, (err as Error).message);
+        }
+      }
+    }
+    const target = moveToDeadLetter(bot, filePath);
+    clearLifecycleState(filePath);
+    debug(`(${bot.slug}) dead-lettered ${filePath} -> ${target}`);
+    return true;
+  }
+
+  async function transientOrTerminal(
+    bot: OutboundBot,
+    filePath: string,
+    msg: AMPMessage,
+    input: Omit<FailureInput, 'attempts'>,
+  ): Promise<boolean> {
+    const attempts = recordAttempt(filePath);
+    if (attempts >= maxDeliveryAttempts) {
+      return terminalFailure(bot, filePath, msg, { ...input, attempts });
+    }
+    return false;
   }
 
   async function processMessageFile(bot: OutboundBot, filePath: string): Promise<boolean> {
@@ -332,9 +473,28 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
 
     try {
       const inReplyTo = msg.envelope?.in_reply_to;
+      if (isDeliveryFailureMessage(msg)) {
+        return terminalFailure(
+          bot,
+          filePath,
+          msg,
+          {
+            reason: 'no_conversation',
+            detail: 'delivery failure notification is itself undeliverable',
+            retryable: false,
+            attempts: recordAttempt(filePath),
+          },
+          false,
+        );
+      }
       if (!inReplyTo) {
-        console.log(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} has no in_reply_to — cannot resolve a conversation, leaving.`);
-        return false;
+        console.log(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} has no in_reply_to — cannot resolve a conversation, dead-lettering.`);
+        return terminalFailure(bot, filePath, msg, {
+          reason: 'no_conversation',
+          detail: 'message has no in_reply_to, so the Teams conversation cannot be resolved',
+          retryable: false,
+          attempts: recordAttempt(filePath),
+        });
       }
 
       // INBOX-AUTHORITATIVE: scope strictly to this inbox's bot. No payload.context.
@@ -346,7 +506,11 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
           console.log(`[OUTBOUND] (${bot.slug}) no thread mapping for in_reply_to=${inReplyTo} (evicted/expired/unknown) — undeliverable, leaving for retry.`);
           warnedUndeliverable.add(filePath);
         }
-        return false;
+        return transientOrTerminal(bot, filePath, msg, {
+          reason: 'mapping_expired',
+          detail: `no thread mapping for in_reply_to=${inReplyTo} after ${maxDeliveryAttempts} attempt(s)`,
+          retryable: false,
+        });
       }
 
       const reference = entry.context.reference;
@@ -357,8 +521,13 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       // the field) fall back to reference.conversation.id = unchanged 1:1 behavior.
       const conversationId = entry.context.replyConversationId ?? reference?.conversation?.id;
       if (!conversationId) {
-        console.error(`[OUTBOUND] (${bot.slug}) stored reference for in_reply_to=${inReplyTo} has no conversation id — cannot deliver, leaving.`);
-        return false;
+        console.error(`[OUTBOUND] (${bot.slug}) stored reference for in_reply_to=${inReplyTo} has no conversation id — cannot deliver, dead-lettering.`);
+        return terminalFailure(bot, filePath, msg, {
+          reason: 'no_conversation',
+          detail: `stored reference for in_reply_to=${inReplyTo} has no conversation id`,
+          retryable: false,
+          attempts: recordAttempt(filePath),
+        });
       }
 
       // Fork-O1 observability: App.send uses the bot's configured serviceUrl, not
@@ -441,7 +610,7 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       if (chunks.length === 0 && !cardObject && declared.length === 0) {
         console.log(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} is an empty reply — nothing to post, deleting.`);
         fs.unlinkSync(filePath);
-        warnedUndeliverable.delete(filePath);
+        clearLifecycleState(filePath);
         return true;
       }
 
@@ -456,12 +625,19 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
             console.error(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} is attachment-only but no attachment could be pulled — leaving for retry.`);
             warnedUndeliverable.add(filePath);
           }
-          return false;
+          return transientOrTerminal(bot, filePath, msg, {
+            reason: 'attachment_unavailable',
+            detail: `no cited attachment could be pulled after ${maxDeliveryAttempts} attempt(s)`,
+            retryable: true,
+          });
         }
-        console.error(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} is attachment-only but all ${declared.length} cited descriptor(s) were rejected by policy — dropping (not retrying).`);
-        fs.unlinkSync(filePath);
-        warnedUndeliverable.delete(filePath);
-        return true;
+        console.error(`[OUTBOUND] (${bot.slug}) ${path.basename(filePath)} is attachment-only but all ${declared.length} cited descriptor(s) were rejected by policy — dead-lettering.`);
+        return terminalFailure(bot, filePath, msg, {
+          reason: 'attachment_rejected',
+          detail: `all ${declared.length} cited attachment descriptor(s) were rejected by policy`,
+          retryable: false,
+          attempts: recordAttempt(filePath),
+        });
       }
 
       let sentCard = false;
@@ -499,12 +675,24 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       }
 
       fs.unlinkSync(filePath);
-      warnedUndeliverable.delete(filePath);
+      clearLifecycleState(filePath);
       debug(`(${bot.slug}) deleted processed reply ${filePath}`);
       return true;
     } catch (err) {
       console.error(`[OUTBOUND] (${bot.slug}) failed to deliver ${path.basename(filePath)}:`, (err as Error).message);
-      return false;
+      if (isForbiddenOrUnreachable(err)) {
+        return terminalFailure(bot, filePath, msg, {
+          reason: 'bot_unreachable_or_forbidden',
+          detail: `Teams rejected delivery with status ${statusFromError(err)}`,
+          retryable: false,
+          attempts: recordAttempt(filePath),
+        });
+      }
+      return transientOrTerminal(bot, filePath, msg, {
+        reason: 'teams_api_error',
+        detail: `Teams delivery failed: ${(err as Error).message}`,
+        retryable: true,
+      });
     }
   }
 
@@ -562,6 +750,9 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
       for (const filePath of warnedUndeliverable) {
         if (!seenThisScan.has(filePath)) warnedUndeliverable.delete(filePath);
       }
+      for (const filePath of deliveryAttempts.keys()) {
+        if (!seenThisScan.has(filePath)) deliveryAttempts.delete(filePath);
+      }
     } finally {
       isPolling = false;
     }
@@ -569,7 +760,9 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
 
   const poll = async (): Promise<void> => {
     await scanAll();
-    pollTimeoutId = setTimeout(() => void poll(), deps.pollIntervalMs);
+    if (!stopped) {
+      pollTimeoutId = setTimeout(() => void poll(), deps.pollIntervalMs);
+    }
   };
 
   void poll();
@@ -579,6 +772,7 @@ export function startOutboundPoller(deps: OutboundDeps): () => void {
   }
 
   return () => {
+    stopped = true;
     if (pollTimeoutId) {
       clearTimeout(pollTimeoutId);
       pollTimeoutId = null;

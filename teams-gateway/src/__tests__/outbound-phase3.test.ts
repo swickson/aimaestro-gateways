@@ -193,7 +193,7 @@ describe('Teams outbound reply poller', () => {
     assert.doesNotMatch(sends[0] ?? '', /SECRET|db\.internal|AUTOMATED MEMORY RECALL|memory-recall/i);
   });
 
-  it('leaves replies on disk when in_reply_to is missing, unmapped, or send fails', async () => {
+  it('dead-letters terminal failures while leaving bounded transient failures for retry', async () => {
     const root = tempDir();
     const inbox = path.join(root, 'inbox');
     const noReplyFile = writeInboxMessage(inbox, message({
@@ -231,7 +231,8 @@ describe('Teams outbound reply poller', () => {
       stop();
     }
 
-    assert.equal(fs.existsSync(noReplyFile), true);
+    assert.equal(fs.existsSync(noReplyFile), false);
+    assert.equal(fs.existsSync(path.join(inbox, 'dead-letter', path.relative(inbox, noReplyFile))), true);
     assert.equal(fs.existsSync(unmappedFile), true);
     assert.equal(fs.existsSync(failingFile), true);
   });
@@ -262,6 +263,7 @@ describe('Teams outbound reply poller', () => {
       markdownDefault: true,
       policy: TEST_POLICY,
       debug: false,
+      maxDeliveryAttempts: 99,
     });
     try {
       await waitFor(() => logs.some((line) => line.includes('no thread mapping')), 'first unmapped warning');
