@@ -60,7 +60,7 @@ function extractHosts(parsed: unknown): RawHost[] | null {
   if (parsed && typeof parsed === 'object') {
     const obj = parsed as Record<string, unknown>;
     if (Array.isArray(obj.hosts)) return obj.hosts as RawHost[];
-    // id-keyed map: { holmes: {...}, redacted-1: {...} } — cheap defensive tolerance.
+    // id-keyed map: { mesh-a: {...}, mesh-b: {...} } — cheap defensive tolerance.
     const values = Object.values(obj);
     if (values.every((v) => v && typeof v === 'object' && !Array.isArray(v))) {
       return values as RawHost[];

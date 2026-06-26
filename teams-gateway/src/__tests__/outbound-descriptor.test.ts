@@ -17,7 +17,7 @@ import type { AttachmentPolicy } from '../types.js';
 const POLICY: AttachmentPolicy = { maxBytes: 26_214_400, maxCount: 10, denyContentTypes: ['application/x-msdownload'] };
 
 // Trusted mesh allowlist: the gateway's own maestroUrl origin + a remote mesh host.
-const ALLOWED = new Set(['http://127.0.0.1:23000', 'http://203.0.113.12:23000']);
+const ALLOWED = new Set(['http://127.0.0.1:23000', 'http://192.0.2.4:23000']);
 
 const HEX = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
@@ -52,7 +52,7 @@ describe('validateOutboundDescriptor — recalibrated consume boundary', () => {
 
   it('ACCEPTS a url on a remote mesh-host origin in the allowlist', () => {
     assert.equal(ok(descriptor({
-      url: 'http://203.0.113.12:23000/api/v1/attachments/att-9/download?sig=x',
+      url: 'http://192.0.2.4:23000/api/v1/attachments/att-9/download?sig=x',
     })), null);
   });
 
