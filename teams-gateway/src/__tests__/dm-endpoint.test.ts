@@ -58,7 +58,7 @@ function deps(
 ): DmDeps {
   return {
     threadStore: store,
-    knownBots: new Set(['maestro', 'echo']),
+    knownBots: new Set(['echo', 'maestro']),
     coldStartEnabled: false,
     markdownDefault,
     sendChunk: async (botSlug, conversationId, text, markdown) => {
@@ -91,6 +91,53 @@ describe('deliverDm (proactive DM core)', () => {
     assert.equal(r.status, 400);
     assert.equal(r.json.error, 'bad_request');
     assert.equal(sent.length, 0);
+  });
+
+  it('reuses the only live bot when botSlug is omitted for a single-bot user', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    store.record(entry({ botSlug: 'maestro', conversationId: 'conv-maestro', ampMessageId: 'amp-maestro' }));
+    const sent: Sent[] = [];
+
+    const r = await deliverDm(deps(store, sent), { platformUserId: 'aad-user-1', message: 'single-bot reuse' });
+
+    assert.equal(r.status, 200);
+    assert.equal(r.json.botSlug, 'maestro');
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.botSlug, 'maestro');
+    assert.equal(sent[0]?.conversationId, 'conv-maestro');
+  });
+
+  it('409s ambiguous_bot when a multi-bot user omits botSlug instead of recency-guessing', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    store.record(entry({ botSlug: 'maestro', conversationId: 'conv-maestro', ampMessageId: 'amp-maestro', createdAt: 100 }));
+    store.record(entry({ botSlug: 'echo', conversationId: 'conv-echo', ampMessageId: 'amp-echo', createdAt: 200 }));
+    const sent: Sent[] = [];
+
+    const r = await deliverDm(deps(store, sent), { platformUserId: 'aad-user-1', message: 'incident regression' });
+
+    assert.equal(r.status, 409);
+    assert.equal(r.json.error, 'undeliverable');
+    assert.equal(r.json.reason, 'ambiguous_bot');
+    assert.deepEqual(r.json.candidates, ['echo', 'maestro']);
+    assert.equal(sent.length, 0, 'must not deliver via the most-recent echo mapping');
+  });
+
+  it('honors a pinned valid bot even when another bot is more recent', async () => {
+    const store = createThreadStore({ maxAgeMs: Infinity });
+    store.record(entry({ botSlug: 'maestro', conversationId: 'conv-maestro', ampMessageId: 'amp-maestro', createdAt: 100 }));
+    store.record(entry({ botSlug: 'echo', conversationId: 'conv-echo', ampMessageId: 'amp-echo', createdAt: 200 }));
+    const sent: Sent[] = [];
+
+    const r = await deliverDm(
+      deps(store, sent, true, { knownBots: new Set(['echo', 'maestro']) }),
+      { platformUserId: 'aad-user-1', botSlug: 'maestro', message: 'pinned' },
+    );
+
+    assert.equal(r.status, 200);
+    assert.equal(r.json.botSlug, 'maestro');
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.botSlug, 'maestro');
+    assert.equal(sent[0]?.conversationId, 'conv-maestro');
   });
 
   it('409s undeliverable when the user has no prior contact and cold-start is disabled', async () => {
@@ -263,15 +310,16 @@ describe('deliverDm (proactive DM core)', () => {
     assert.equal(sent[0]?.text, 'ping');
   });
 
-  it('falls back to the most-recent bot when no botSlug is supplied', async () => {
+  it('does not fall back to the most-recent bot when no botSlug is supplied for a multi-bot user', async () => {
     const store = createThreadStore({ maxAgeMs: Infinity });
     store.record(entry({ botSlug: 'maestro', conversationId: 'conv-m', ampMessageId: 'amp-m', createdAt: 100 }));
     store.record(entry({ botSlug: 'echo', conversationId: 'conv-e', ampMessageId: 'amp-e', createdAt: 200 }));
     const sent: Sent[] = [];
     const r = await deliverDm(deps(store, sent), { platformUserId: 'aad-user-1', message: 'ping' });
-    assert.equal(r.status, 200);
-    assert.equal(r.json.botSlug, 'echo', 'last-seen bot wins');
-    assert.equal(sent[0]?.conversationId, 'conv-e');
+    assert.equal(r.status, 409);
+    assert.equal(r.json.reason, 'ambiguous_bot');
+    assert.deepEqual(r.json.candidates, ['echo', 'maestro']);
+    assert.equal(sent.length, 0);
   });
 
   it('prepends a bold subject line when subject is present', async () => {
