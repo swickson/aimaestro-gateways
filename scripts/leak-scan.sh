@@ -13,6 +13,14 @@
 # documents EXAMPLE Tailscale IPs, so only the SPECIFIC real mesh IPs (in the
 # secret) are leaks.
 #
+# TIERS: the denylist may carry a SOFT marker line (a comment containing the word
+# SOFT, e.g. "# --- SOFT (warn-only) ---"). Tokens BEFORE the marker are HARD
+# (real mesh structure: IPs / hostnames / secrets) → FAIL the build. Tokens AFTER
+# it are SOFT (agent + operator NAMES) → WARN only, non-blocking: a name has no
+# attack value (the operator's name is already on every commit; agent handles are
+# invented), so we surface it as a reminder without forcing lossy comment-scrubs
+# on every PR. A denylist with NO marker is treated as ALL-HARD (backward compat).
+#
 # Local pre-PR:  LEAK_DENYLIST="$(cat ~/.aimaestro/leak-denylist.txt)" scripts/leak-scan.sh
 # CI:            LEAK_DENYLIST from a repo secret (.github/workflows/leak-scan.yml)
 set -uo pipefail
@@ -41,17 +49,43 @@ if [ -z "${LEAK_DENYLIST:-}" ]; then
   exit 0
 fi
 
-pat=$(printf '%s\n' "$LEAK_DENYLIST" | grep -vE '^[[:space:]]*$' | paste -sd '|' -)
-if [ -z "$pat" ]; then echo "✅ leak-scan: empty denylist, nothing to check."; exit 0; fi
+# Split the denylist into HARD / SOFT tiers on the SOFT marker line (a comment
+# line containing the word SOFT). Tokens before the marker → HARD; after → SOFT.
+# No marker → everything HARD (backward compatible). Comment (#) and blank lines
+# are dropped from the patterns either way.
+soft_marker_re='^[[:space:]]*#.*SOFT'
+clean_patterns() { grep -vE '^[[:space:]]*(#|$)' | paste -sd '|' -; }
+hard_pat=$(printf '%s\n' "$LEAK_DENYLIST" | awk -v m="$soft_marker_re" '$0 ~ m {f=1; next} !f' | clean_patterns)
+soft_pat=$(printf '%s\n' "$LEAK_DENYLIST" | awk -v m="$soft_marker_re" '$0 ~ m {f=1; next}  f' | clean_patterns)
 
-# For each candidate hit, strip KEEP terms then re-test the denylist on what
-# remains — a hit survives only if a real token is present after KEEP removal.
-out=$(files | tr '\n' '\0' | xargs -0 grep -InHE -- "($pat)" 2>/dev/null | while IFS= read -r hit; do
-  if printf '%s\n' "$hit" | strip_keep | grep -qE -- "($pat)"; then printf '%s\n' "$hit"; fi
-done)
-if [ -n "$out" ]; then
-  printf '\n❌ leak-scan FOUND private tokens in committed content:\n%s\n\n' "$out"
+# Emit "file:line:content" hits where a denylist token SURVIVES the KEEP-strip.
+scan() {
+  local pat="$1"
+  [ -z "$pat" ] && return 0
+  files | tr '\n' '\0' | xargs -0 grep -InHE -- "($pat)" 2>/dev/null | while IFS= read -r hit; do
+    if printf '%s\n' "$hit" | strip_keep | grep -qE -- "($pat)"; then printf '%s\n' "$hit"; fi
+  done
+}
+
+hard_hits=$(scan "$hard_pat")
+soft_hits=$(scan "$soft_pat")
+
+# SOFT — warn only, never blocks.
+if [ -n "$soft_hits" ]; then
+  printf '\n⚠️  leak-scan WARN — agent/operator NAME tokens in committed content (cosmetic, non-blocking):\n%s\n' "$soft_hits"
+  echo "These are warn-tier (names, not mesh structure). Genericize if convenient — not required to merge."
+fi
+
+# HARD — fail.
+if [ -n "$hard_hits" ]; then
+  printf '\n❌ leak-scan FOUND HARD private tokens (mesh IPs / hostnames / secrets) in committed content:\n%s\n\n' "$hard_hits"
   echo "Scrub to generic placeholders before merge (CLAUDE.md → Public-repo hygiene)."
   exit 1
 fi
-echo "✅ leak-scan: clean."
+
+if [ -n "$soft_hits" ]; then
+  echo "✅ leak-scan: no HARD tokens (soft name-warnings above are non-blocking)."
+else
+  echo "✅ leak-scan: clean."
+fi
+exit 0
