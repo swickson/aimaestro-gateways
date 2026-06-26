@@ -32,7 +32,7 @@ const REAL_SHAPE = {
       aliases: ['holmes', '10.10.40.59', '100.81.151.18', 'http://10.10.40.59:23000', 'http://100.81.151.18:23000'],
     },
     { id: 'bananajr', url: 'http://100.112.62.82:23000', type: 'remote', enabled: true, aliases: [] },
-    { id: 'shanes-m3-pro-mbp', name: 'Milo', url: 'http://100.83.160.34:23000', type: 'remote', enabled: true, aliases: ['shanes-m3-pro-mbp', 'milo-dock.internal'] },
+    { id: 'host-c', name: 'Host C', url: 'http://host-c:23000', type: 'remote', enabled: true, aliases: ['host-c', 'host-c.internal'] },
   ],
 };
 
@@ -43,14 +43,14 @@ describe('loadMeshOrigins', () => {
     // canonical urls
     assert.ok(origins.has('http://100.81.151.18:23000'));
     assert.ok(origins.has('http://100.112.62.82:23000'));
-    assert.ok(origins.has('http://100.83.160.34:23000'));
+    assert.ok(origins.has('http://host-c:23000'));
     // the http:// alias contributes the LAN-IP origin variant
     assert.ok(origins.has('http://10.10.40.59:23000'));
     // bare hostname / bare IP aliases are NOT turned into origins
     assert.ok(!origins.has('holmes'));
     assert.ok(!origins.has('10.10.40.59'));
     assert.ok(!origins.has('100.81.151.18'));
-    assert.ok(!origins.has('milo-dock.internal'));
+    assert.ok(!origins.has('host-c.internal'));
     // exactly the 4 real origins, no synthesized extras
     assert.equal(origins.size, 4);
   });
