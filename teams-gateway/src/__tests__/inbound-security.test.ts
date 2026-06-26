@@ -266,7 +266,7 @@ describe('Teams inbound dedupe and scope gate', () => {
     assert.equal(routed[1]?.payload.context?.room?.threadRootId, 'root-1');
   });
 
-  // #20 BLOCKER (Columbo): channel-root recency must NOT cross-link. Two SEPARATE
+  // #20 BLOCKER (the reviewer): channel-root recency must NOT cross-link. Two SEPARATE
   // root posts in the SAME channel share the RAW conversation.id (a thread-root has
   // no `;messageid=` suffix). Keying recency on that raw id made root B inherit root
   // A's inReplyTo + isNewConversation=false — bleeding context across unrelated

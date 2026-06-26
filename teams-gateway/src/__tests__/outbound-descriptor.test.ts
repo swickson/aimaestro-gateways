@@ -1,7 +1,7 @@
 /**
  * w3 outbound recalibration — validateOutboundDescriptor (outbound.ts) matrix.
  *
- * Direct unit coverage of the consume-boundary validator after the Watson-locked
+ * Direct unit coverage of the consume-boundary validator after the Maestro core-locked
  * recalibration: KIND (reject only `legacy`, infer amp-v1 by shape), ORIGIN (accept
  * any trusted mesh-host origin in the allowlist, REJECT arbitrary external = SSRF
  * closed), DIGEST (tolerate an optional `sha256:` prefix), while the path-pin +

@@ -20,7 +20,7 @@ import { logEvent } from './api/activity-log.js';
 
 // Some upstream Discord webhook producers (notably the Facebook Groups
 // Watcher) double-emit every event within <50ms. We drop the second copy
-// at the gateway because Hale should not draft the same response twice
+// at the gateway because the safety agent should not draft the same response twice
 // and the memory-retrieval middleware could double-weight reinforced facts.
 const watchDedupSeen = new Map<string, number>();
 

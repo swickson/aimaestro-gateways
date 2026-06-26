@@ -1,0 +1,22 @@
+name: leak-scan
+
+# Fails the build if private mesh/agent/client/operator tokens are committed to
+# this PUBLIC repo. The denylist of actual private names lives in a repo secret
+# (LEAK_DENYLIST), never in the tree — see scripts/leak-scan.sh.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  leak-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan for committed private tokens
+        env:
+          LEAK_DENYLIST: ${{ secrets.LEAK_DENYLIST }}
+        run: bash scripts/leak-scan.sh
