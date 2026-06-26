@@ -127,7 +127,7 @@ function setup(): { bot: OutboundBot; sends: SentRecord[]; fetched: Array<{ url:
     slug: 'maestro',
     inboxDir: inbox,
     maestroUrl: 'https://maestro.test',
-    allowedOrigins: new Set(['https://maestro.test']),
+    getAllowedOrigins: () => new Set(['https://maestro.test']),
     send: async (_conversationId, text, _markdown, attachments) => {
       sends.push({ text, attachments });
     },
@@ -270,7 +270,7 @@ describe('w3 outbound attachment hardening (descriptor trust)', () => {
       slug: 'maestro',
       inboxDir: inbox,
       maestroUrl: 'https://maestro.test',
-      allowedOrigins: new Set(['https://maestro.test']),
+      getAllowedOrigins: () => new Set(['https://maestro.test']),
       send: async (_conversationId, text, _markdown, attachments) => {
         sends.push({ text, attachments });
       },
