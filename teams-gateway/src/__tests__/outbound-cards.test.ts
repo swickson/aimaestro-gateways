@@ -210,7 +210,7 @@ describe('Teams Adaptive Cards Outbound', () => {
           slug: 'maestro',
           inboxDir: inbox,
           maestroUrl: 'https://maestro.test',
-          allowedOrigins: new Set(['https://maestro.test']),
+          getAllowedOrigins: () => new Set(['https://maestro.test']),
           send: async (conversationId, text, markdown, attachments, card) => {
             sends.push({ conversationId, text, markdown, card });
           },
@@ -285,7 +285,7 @@ describe('Teams Adaptive Cards Outbound', () => {
           slug: 'maestro',
           inboxDir: inbox,
           maestroUrl: 'https://maestro.test',
-          allowedOrigins: new Set(['https://maestro.test']),
+          getAllowedOrigins: () => new Set(['https://maestro.test']),
           send: async (conversationId, text, markdown, attachments, card) => {
             if (card && firstCall) {
               firstCall = false;
@@ -359,7 +359,7 @@ describe('Teams Adaptive Cards Outbound', () => {
           slug: 'maestro',
           inboxDir: inbox,
           maestroUrl: 'https://maestro.test',
-          allowedOrigins: new Set(['https://maestro.test']),
+          getAllowedOrigins: () => new Set(['https://maestro.test']),
           send: async (conversationId, text, markdown, attachments, card) => {
             sends.push({ conversationId, text, markdown, card });
           },
@@ -434,7 +434,7 @@ describe('Teams Adaptive Cards Outbound', () => {
           slug: 'maestro',
           inboxDir: inbox,
           maestroUrl: 'https://maestro.test',
-          allowedOrigins: new Set(['https://maestro.test']),
+          getAllowedOrigins: () => new Set(['https://maestro.test']),
           send: async (conversationId, text, markdown, attachments, card) => {
             sends.push({ conversationId, text, markdown, card });
           },

@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
-import { loadMeshOrigins } from '../mesh-hosts.js';
+import { loadMeshOrigins, OriginHolder } from '../mesh-hosts.js';
 
 const origWarn = console.warn;
 const origLog = console.log;
@@ -88,5 +88,50 @@ describe('loadMeshOrigins', () => {
       json: { hosts: [{ id: 'x', url: 'not-a-url', enabled: true, aliases: ['http://100.9.9.9:23000'] }] },
     });
     assert.deepEqual([...origins], ['http://100.9.9.9:23000']);
+  });
+});
+
+describe('OriginHolder', () => {
+  const MAESTRO_URL = 'http://127.0.0.1:23000';
+
+  it('initializes with maestroUrl plus initial mesh origins', () => {
+    const initialMesh = new Set(['http://10.10.10.1:23000']);
+    const holder = new OriginHolder(MAESTRO_URL, initialMesh);
+    assert.equal(holder.current.size, 2);
+    assert.ok(holder.current.has(MAESTRO_URL));
+    assert.ok(holder.current.has('http://10.10.10.1:23000'));
+  });
+
+  it('reloads and updates origins on success, keeping maestroUrl', () => {
+    const holder = new OriginHolder(MAESTRO_URL, new Set(['http://old:23000']));
+    assert.ok(holder.current.has('http://old:23000'));
+    
+    // reload with a valid shape
+    holder.reload({ json: { hosts: [{ id: 'new', url: 'http://new:23000', enabled: true, aliases: [] }] } });
+    
+    assert.equal(holder.current.size, 2);
+    assert.ok(holder.current.has(MAESTRO_URL));
+    assert.ok(holder.current.has('http://new:23000'));
+    assert.ok(!holder.current.has('http://old:23000')); // old origin removed
+  });
+
+  it('FAIL-SAFE: retains previous valid set and warns on empty/malformed source', () => {
+    const holder = new OriginHolder(MAESTRO_URL, new Set(['http://good:23000']));
+    const originalSet = holder.current;
+    assert.equal(originalSet.size, 2);
+    
+    let warned = false;
+    const localOrigWarn = console.warn;
+    console.warn = () => { warned = true; };
+    try {
+      holder.reload({ json: 'malformed' });
+    } finally {
+      console.warn = localOrigWarn;
+    }
+    
+    // The reference must be identically preserved (never swapped)
+    assert.strictEqual(holder.current, originalSet);
+    assert.ok(warned, 'Expected fail-safe warning to be logged');
+    assert.ok(holder.current.has('http://good:23000'));
   });
 });

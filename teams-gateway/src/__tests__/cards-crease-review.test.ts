@@ -109,7 +109,7 @@ async function runPoller(
       slug: 'maestro',
       inboxDir: inbox,
       maestroUrl: 'https://maestro.test',
-      allowedOrigins: new Set(['https://maestro.test']),
+      getAllowedOrigins: () => new Set(['https://maestro.test']),
       send: async (_conversationId, text, markdown, attachments, card) => {
         const rec = { text, markdown, attachments, card };
         sends.push(rec);

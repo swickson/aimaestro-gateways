@@ -105,3 +105,42 @@ export function loadMeshOrigins(options: LoadMeshOriginsOptions = {}): Set<strin
   }
   return origins;
 }
+
+/**
+ * Mutable holder for the outbound-attachment origin allowlist. Ensures the gate
+ * is live-resolved without restarting, while enforcing the security fail-safe:
+ * a malformed reload NEVER replaces the live set with an empty/degraded one.
+ */
+export class OriginHolder {
+  private currentOrigins: ReadonlySet<string>;
+
+  constructor(private maestroUrl: string, initialMesh: Set<string>) {
+    this.currentOrigins = this.buildOrigins(initialMesh);
+  }
+
+  private buildOrigins(mesh: Set<string>): ReadonlySet<string> {
+    return new Set([new URL(this.maestroUrl).origin, ...mesh]);
+  }
+
+  /** Gets the live set of allowed origins (maestroUrl + enabled mesh hosts). */
+  get current(): ReadonlySet<string> {
+    return this.currentOrigins;
+  }
+
+  /**
+   * Reload the mesh origins. If the file is missing/malformed (empty set),
+   * the reload is ABORTED and the previous valid allowlist is retained.
+   */
+  reload(options?: LoadMeshOriginsOptions): void {
+    const newMesh = loadMeshOrigins(options);
+    if (newMesh.size === 0) {
+      console.warn(
+        '[MESH] ⚠️  Reload triggered but no mesh-host origins loaded (file missing/malformed or empty). ' +
+          'RETAINING previous allowlist to prevent silent outbound attachment drops.'
+      );
+      return;
+    }
+    this.currentOrigins = this.buildOrigins(newMesh);
+    console.log(`[MESH] reloaded trusted outbound attachment origins: ${[...newMesh].join(', ')}`);
+  }
+}
