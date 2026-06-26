@@ -251,7 +251,7 @@ describe('w3 outbound attachment delivery', () => {
 });
 
 /**
- * w3 FIX-LOOP — outbound consume-path hardening (the reviewer P1 + Maestro core F2).
+ * w3 FIX-LOOP — outbound consume-path hardening (Columbo P1 + Watson F2).
  * The agent-controlled `payload.attachments` is now policy-validated BEFORE any byte
  * is pulled; the pull is bounded + follows no redirects. These cover each hostile /
  * malformed descriptor shape and the bounded-read / redirect rejections.

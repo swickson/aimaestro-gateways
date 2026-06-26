@@ -11,7 +11,7 @@
  * never-seen user is still unresolvable — no Graph lookup or operator-supplied
  * identity path lives here.
  *
- * SEND-BOT RESOLUTION (contract, locked with Maestro core): `body.botSlug ?? by-user
+ * SEND-BOT RESOLUTION (contract, locked with Watson): `body.botSlug ?? by-user
  * single-bot reuse ?? 409`. The caller may pin a bot; otherwise a single live bot
  * can be reused. Multi-bot users must pin `botSlug`; the gateway will not guess via
  * recency because that can send under the wrong bot identity. A pinned bot that is

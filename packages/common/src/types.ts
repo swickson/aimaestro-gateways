@@ -113,7 +113,7 @@ export interface AMPAttachmentV1 {
   url: string;
   /**
    * Scan lifecycle: pending -> basic_clean (confirm) / rejected (confirm fail) /
-   * clean. `suspicious` is a terminal non-routable verdict Maestro may emit (Maestro core
+   * clean. `suspicious` is a terminal non-routable verdict Maestro may emit (Watson
    * F1) — NOT in {clean,basic_clean}, so the gateway treats it as undeliverable.
    */
   scan_status: 'pending' | 'basic_clean' | 'clean' | 'rejected' | 'suspicious';
