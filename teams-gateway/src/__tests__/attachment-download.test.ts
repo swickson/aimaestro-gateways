@@ -49,7 +49,7 @@ function installFetch(statuses: number[] = [200], bytes = new Uint8Array([1, 2, 
 }
 
 function deps(getConnectorToken: AttachmentDownloadDeps['getConnectorToken']): AttachmentDownloadDeps {
-  return { getConnectorToken, timeoutMs: 1000, bodyStallMs: 200, slug: 'leoai' };
+  return { getConnectorToken, timeoutMs: 1000, bodyStallMs: 200, slug: 'echo' };
 }
 
 const tokenOk = async () => 'CONNECTOR.JWT.TOKEN';

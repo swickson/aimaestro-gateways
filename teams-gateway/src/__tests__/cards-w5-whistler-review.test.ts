@@ -97,7 +97,7 @@ async function runPoller(msg: AMPMessage): Promise<{
       slug: 'maestro',
       inboxDir: inbox,
       maestroUrl: 'https://maestro.test',
-      allowedOrigins: new Set(['https://maestro.test']),
+      getAllowedOrigins: () => new Set(['https://maestro.test']),
       send: async (_conversationId, text, _markdown, _attachments, card) => {
         sends.push({ text, card });
       },
