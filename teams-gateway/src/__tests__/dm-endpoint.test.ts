@@ -58,7 +58,7 @@ function deps(
 ): DmDeps {
   return {
     threadStore: store,
-    knownBots: new Set(['maestro', 'echo']),
+    knownBots: new Set(['echo', 'maestro']),
     coldStartEnabled: false,
     markdownDefault,
     sendChunk: async (botSlug, conversationId, text, markdown) => {
@@ -109,8 +109,8 @@ describe('deliverDm (proactive DM core)', () => {
 
   it('409s ambiguous_bot when a multi-bot user omits botSlug instead of recency-guessing', async () => {
     const store = createThreadStore({ maxAgeMs: Infinity });
-    store.record(entry({ botSlug: 'leoai', conversationId: 'conv-leoai', ampMessageId: 'amp-leoai', createdAt: 100 }));
-    store.record(entry({ botSlug: 'zach', conversationId: 'conv-zach', ampMessageId: 'amp-zach', createdAt: 200 }));
+    store.record(entry({ botSlug: 'maestro', conversationId: 'conv-maestro', ampMessageId: 'amp-maestro', createdAt: 100 }));
+    store.record(entry({ botSlug: 'echo', conversationId: 'conv-echo', ampMessageId: 'amp-echo', createdAt: 200 }));
     const sent: Sent[] = [];
 
     const r = await deliverDm(deps(store, sent), { platformUserId: 'aad-user-1', message: 'incident regression' });
@@ -118,26 +118,26 @@ describe('deliverDm (proactive DM core)', () => {
     assert.equal(r.status, 409);
     assert.equal(r.json.error, 'undeliverable');
     assert.equal(r.json.reason, 'ambiguous_bot');
-    assert.deepEqual(r.json.candidates, ['leoai', 'zach']);
-    assert.equal(sent.length, 0, 'must not deliver via the most-recent zach mapping');
+    assert.deepEqual(r.json.candidates, ['echo', 'maestro']);
+    assert.equal(sent.length, 0, 'must not deliver via the most-recent echo mapping');
   });
 
   it('honors a pinned valid bot even when another bot is more recent', async () => {
     const store = createThreadStore({ maxAgeMs: Infinity });
-    store.record(entry({ botSlug: 'leoai', conversationId: 'conv-leoai', ampMessageId: 'amp-leoai', createdAt: 100 }));
-    store.record(entry({ botSlug: 'zach', conversationId: 'conv-zach', ampMessageId: 'amp-zach', createdAt: 200 }));
+    store.record(entry({ botSlug: 'maestro', conversationId: 'conv-maestro', ampMessageId: 'amp-maestro', createdAt: 100 }));
+    store.record(entry({ botSlug: 'echo', conversationId: 'conv-echo', ampMessageId: 'amp-echo', createdAt: 200 }));
     const sent: Sent[] = [];
 
     const r = await deliverDm(
-      deps(store, sent, true, { knownBots: new Set(['leoai', 'zach']) }),
-      { platformUserId: 'aad-user-1', botSlug: 'leoai', message: 'pinned' },
+      deps(store, sent, true, { knownBots: new Set(['echo', 'maestro']) }),
+      { platformUserId: 'aad-user-1', botSlug: 'maestro', message: 'pinned' },
     );
 
     assert.equal(r.status, 200);
-    assert.equal(r.json.botSlug, 'leoai');
+    assert.equal(r.json.botSlug, 'maestro');
     assert.equal(sent.length, 1);
-    assert.equal(sent[0]?.botSlug, 'leoai');
-    assert.equal(sent[0]?.conversationId, 'conv-leoai');
+    assert.equal(sent[0]?.botSlug, 'maestro');
+    assert.equal(sent[0]?.conversationId, 'conv-maestro');
   });
 
   it('409s undeliverable when the user has no prior contact and cold-start is disabled', async () => {
