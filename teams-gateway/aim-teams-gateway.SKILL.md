@@ -5,7 +5,7 @@ metadata:
   type: reference
   owner: Bishop (content) / KAI (packaging + distribution)
   source: swickson/aimaestro-gateways · teams-gateway
-  tracks: deployed gateway contract as of w4 (#15/#16/#20) + w5 (#21/#22)
+  tracks: deployed gateway contract — w4 (#15/#16/#20) + w5 (#21/#22) + multi-bot proactive-DM routing (#34)
 ---
 
 # aim-teams-gateway
@@ -67,6 +67,7 @@ To DM a user without an inbound to reply to, trigger it through Maestro (preferr
 - **v1 captures on first contact:** you can only proactively DM a user who has messaged your bot at least once.
 - **Cold-start** (`createConversation` for a never-DM'd-but-directory-known user) exists but is **flag-gated and off by default**; truly-unknown users are out of scope.
 - Proactive DMs are **text-only** today (no cards/attachments on the proactive path).
+- **Multi-bot deployments:** when several bots share one gateway and the target user has talked to **more than one** of them, a proactive DM that doesn't pin a bot fails with `409 ambiguous_bot` (the response lists the `candidates`). Maestro pins the bot from the user's stored `botSlug` — make sure the notify resolves to **your** bot, so the DM is sent as the right identity. If the user has only ever spoken to one bot, that bot is selected automatically.
 
 ## 7. Channels & group chats
 
