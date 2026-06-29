@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { App } from '@slack/bolt';
-import type { GatewayConfig, AMPMessage, ThreadContext } from './types.js';
+import type { GatewayConfig, AMPMessage } from './types.js';
 import type { ThreadStore } from './thread-store.js';
 import { logEvent } from './api/activity-log.js';
 
