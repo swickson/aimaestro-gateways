@@ -16,6 +16,7 @@ import {
 import { mkdirSync, existsSync, copyFileSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 import pino from 'pino';
+import qrcodeTerminal from 'qrcode-terminal';
 import type { GatewayConfig } from './types.js';
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'logged_out';
@@ -113,9 +114,8 @@ export async function createSession(
       state.status = 'connecting';
       opts.onQr?.(qr);
       if (opts.printQr) {
-        const qrcode = require('qrcode-terminal');
         console.log('\nScan this QR code with WhatsApp (Settings → Linked Devices):\n');
-        qrcode.generate(qr, { small: true });
+        qrcodeTerminal.generate(qr, { small: true });
       }
     }
 

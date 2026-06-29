@@ -43,6 +43,14 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ matrix.gateway }}/package-lock.json
 
+      # Each gateway's tsc compiles the shared packages/common sources via
+      # tsconfig paths, so common's own deps (e.g. express) must be present.
+      # The per-gateway `npm ci` below doesn't install them — install the
+      # workspace root first so they resolve from the hoisted node_modules.
+      - name: Install workspace deps (shared common)
+        working-directory: ${{ github.workspace }}
+        run: npm ci
+
       - name: Install dependencies
         run: npm ci
 
